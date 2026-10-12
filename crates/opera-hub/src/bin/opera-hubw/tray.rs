@@ -1,5 +1,6 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::rc::Rc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -7,17 +8,26 @@ use anyhow::{Context, Result};
 use opera_hub::config::Config;
 use opera_hub::hub;
 use opera_hub::store::Store;
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::dpi::{LogicalSize, PhysicalPosition};
+use tao::event::{ElementState, Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
+use tao::keyboard::Key;
+use tao::window::{Window, WindowBuilder};
 use tokio::sync::oneshot;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const REFRESH: Duration = Duration::from_secs(5);
 const OPERA_RED: [u8; 3] = [0xFF, 0x1A, 0x1A];
+const QR_PANEL_SIZE: f64 = 280.0;
+//space between the tray icon and the panel
+const QR_PANEL_GAP: f64 = 8.0;
+//white border scanners need around the code
+const QR_QUIET_MODULES: usize = 4;
 
 struct Labels {
     pair: &'static str,
+    scan: &'static str,
     quit: &'static str,
     none: &'static str,
     one: &'static str,
@@ -29,6 +39,7 @@ fn labels() -> Labels {
     if french {
         Labels {
             pair: "Appairer un appareil",
+            scan: "Scannez avec Opera · valable 10 min",
             quit: "Quitter",
             none: "Aucun appareil appairé",
             one: "1 appareil appairé",
@@ -37,6 +48,7 @@ fn labels() -> Labels {
     } else {
         Labels {
             pair: "Pair a device",
+            scan: "Scan with Opera · valid 10 min",
             quit: "Quit",
             none: "No paired device",
             one: "1 paired device",
@@ -71,19 +83,124 @@ fn icon() -> Result<Icon> {
     Ok(Icon::from_rgba(rgba, info.width, info.height)?)
 }
 
-//the qr opens in the default image viewer
-fn show_pairing(data_dir: &Path) -> Result<()> {
+struct PairingWindow {
+    window: Rc<Window>,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    dark: Vec<bool>,
+    modules: usize,
+}
+
+//each click makes a new one time code
+fn open_pairing(
+    target: &EventLoopWindowTarget<UserEvent>,
+    data_dir: &Path,
+    labels: &Labels,
+    anchor: Option<tray_icon::Rect>,
+) -> Result<PairingWindow> {
     let link = hub::pairing_link(data_dir)?.to_string();
-    let svg = qrcode::QrCode::new(link.as_bytes())?
-        .render::<qrcode::render::svg::Color>()
-        .min_dimensions(320, 320)
-        .build();
-    let path = data_dir.join("pairing.svg");
-    std::fs::write(&path, svg)?;
+    let code = qrcode::QrCode::new(link.as_bytes())?;
+    let dark = code
+        .to_colors()
+        .iter()
+        .map(|c| *c == qrcode::Color::Dark)
+        .collect();
+    let builder = WindowBuilder::new()
+        .with_title(labels.scan)
+        .with_inner_size(LogicalSize::new(QR_PANEL_SIZE, QR_PANEL_SIZE))
+        .with_resizable(false)
+        .with_decorations(false)
+        .with_always_on_top(true)
+        .with_visible(false);
     #[cfg(windows)]
-    Command::new("explorer").arg(&path).spawn()?;
-    #[cfg(target_os = "macos")]
-    Command::new("open").arg(&path).spawn()?;
+    let builder = {
+        use tao::platform::windows::WindowBuilderExtWindows;
+        builder.with_skip_taskbar(true)
+    };
+    let window = Rc::new(builder.build(target)?);
+    if let Some(anchor) = anchor {
+        place_next_to(&window, anchor);
+    }
+    window.set_visible(true);
+    let context = softbuffer::Context::new(window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let surface =
+        softbuffer::Surface::new(&context, window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    window.set_focus();
+    window.request_redraw();
+    Ok(PairingWindow {
+        window,
+        surface,
+        dark,
+        modules: code.width(),
+    })
+}
+
+//above a bottom taskbar, below a top menu bar
+fn place_next_to(window: &Window, anchor: tray_icon::Rect) {
+    let (ax, ay) = (anchor.position.x, anchor.position.y);
+    let (aw, ah) = (anchor.size.width as f64, anchor.size.height as f64);
+    let Some(monitor) = window
+        .available_monitors()
+        .find(|m| {
+            let (p, s) = (m.position(), m.size());
+            ax >= p.x as f64
+                && ax < p.x as f64 + s.width as f64
+                && ay >= p.y as f64
+                && ay < p.y as f64 + s.height as f64
+        })
+        .or_else(|| window.current_monitor())
+    else {
+        return;
+    };
+    let (screen, screen_size) = (monitor.position(), monitor.size());
+    let size = window.outer_size();
+    let (w, h) = (size.width as f64, size.height as f64);
+    let gap = QR_PANEL_GAP * window.scale_factor();
+    let left = screen.x as f64;
+    let right = (left + screen_size.width as f64 - w).max(left);
+    let x = (ax + aw / 2.0 - w / 2.0).clamp(left, right);
+    let middle = screen.y as f64 + screen_size.height as f64 / 2.0;
+    let y = if ay < middle {
+        ay + ah + gap
+    } else {
+        ay - h - gap
+    };
+    window.set_outer_position(PhysicalPosition::new(x, y));
+}
+
+fn draw_pairing(pairing: &mut PairingWindow) -> Result<()> {
+    let size = pairing.window.inner_size();
+    let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+    else {
+        return Ok(());
+    };
+    pairing
+        .surface
+        .resize(width, height)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut buffer = pairing
+        .surface
+        .buffer_mut()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (width, height) = (size.width as usize, size.height as usize);
+    let total = pairing.modules + QR_QUIET_MODULES * 2;
+    let scale = (width.min(height) / total).max(1);
+    let left = (width.saturating_sub(total * scale)) / 2;
+    let top = (height.saturating_sub(total * scale)) / 2;
+    for y in 0..height {
+        for x in 0..width {
+            let module = |pixel: usize, start: usize| {
+                (pixel.checked_sub(start)? / scale).checked_sub(QR_QUIET_MODULES)
+            };
+            let dark = match (module(x, left), module(y, top)) {
+                (Some(mx), Some(my)) if mx < pairing.modules && my < pairing.modules => {
+                    pairing.dark[my * pairing.modules + mx]
+                }
+                _ => false,
+            };
+            buffer[y * width + x] = if dark { 0x000000 } else { 0xFFFFFF };
+        }
+    }
+    buffer.present().map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -123,9 +240,10 @@ pub fn run(data_dir: PathBuf, stop: oneshot::Sender<()>, hub_thread: JoinHandle<
     let icon = icon()?;
 
     let mut tray: Option<TrayIcon> = None;
+    let mut pairing: Option<PairingWindow> = None;
     let mut stop = Some(stop);
     let mut hub_thread = Some(hub_thread);
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
         match event {
             //macos wants the icon once the loop runs
@@ -146,9 +264,29 @@ pub fn run(data_dir: PathBuf, stop: oneshot::Sender<()>, hub_thread: JoinHandle<
                 devices.set_text(devices_label(&labels, &data_dir));
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *pair.id() => {
-                if let Err(e) = show_pairing(&data_dir) {
-                    tracing::error!("cannot show the pairing code: {e:#}");
+                let anchor = tray.as_ref().and_then(|t| t.rect());
+                match open_pairing(target, &data_dir, &labels, anchor) {
+                    Ok(window) => pairing = Some(window),
+                    Err(e) => tracing::error!("cannot show the pairing code: {e:#}"),
                 }
+            }
+            Event::RedrawRequested(id) => {
+                if let Some(window) = pairing.as_mut().filter(|p| p.window.id() == id)
+                    && let Err(e) = draw_pairing(window)
+                {
+                    tracing::error!("cannot draw the pairing code: {e:#}");
+                }
+            }
+            //a click elsewhere or escape closes the panel
+            Event::WindowEvent {
+                event: WindowEvent::Focused(false) | WindowEvent::CloseRequested,
+                ..
+            } => pairing = None,
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { event, .. },
+                ..
+            } if event.logical_key == Key::Escape && event.state == ElementState::Pressed => {
+                pairing = None
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *quit.id() => {
                 tray.take();

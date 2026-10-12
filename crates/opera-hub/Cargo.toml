@@ -32,7 +32,8 @@ service-manager = "0.11"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 png = "0.18"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.14", default-features = false }
+softbuffer = "0.4"
 sys-locale = "0.3"
 tao = "0.37"
 tray-icon = { version = "0.26", default-features = false }
