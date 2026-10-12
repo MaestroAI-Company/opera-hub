@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # prebuilt client pulled by the opera android build
+  android-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build library
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a build --locked --release -p opera-hub-client
+
+      # stripped lib so bindings read the host build
+      - name: Generate kotlin bindings
+        run: |
+          cargo build --locked -p opera-hub-client
+          cargo run --locked -q -p uniffi-bindgen -- generate \
+            --library target/debug/libopera_hub_client.so \
+            --language kotlin --no-format --out-dir bindings
+
+      - name: Collect assets
+        run: |
+          mkdir dist
+          cp target/aarch64-linux-android/release/libopera_hub_client.so dist/opera-hub-client-arm64-v8a.so
+          cp bindings/uniffi/opera_hub_client/opera_hub_client.kt dist/opera_hub_client.kt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-client
+          path: dist/
+
+  hub:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: opera-hub-linux-x86_64, bin: opera-hub }
+          - { os: ubuntu-24.04-arm, name: opera-hub-linux-aarch64, bin: opera-hub }
+          - { os: macos-latest, name: opera-hub-macos-aarch64, bin: opera-hub }
+          - { os: windows-latest, name: opera-hub-windows-x86_64.exe, bin: opera-hub.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --locked --release -p opera-hub
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/release/${{ matrix.bin }} dist/${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/
+
+  publish:
+    needs: [android-client, hub]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Opera Hub ${GITHUB_REF_NAME#v}" --generate-notes
