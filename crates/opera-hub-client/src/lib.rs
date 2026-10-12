@@ -8,10 +8,10 @@ use std::time::Duration;
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use opera_hub_proto::{
-    ADMIN_ALPN, AdminRequest, AdminResponse, HUB_ALPN, HubRequest, HubResponse, OAuthGrant,
-    PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink,
-    ProvidersRequest, ProvidersResponse, Record, SECRETS_ALPN, SecretsRequest, SecretsResponse,
-    UNAUTHORIZED, hub_addr, request,
+    ADMIN_ALPN, AdminRequest, AdminResponse, COLLECTION_PROVIDERS, HUB_ALPN, HubRequest,
+    HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse,
+    PairingLink, ProvidersRequest, ProvidersResponse, Record, SECRETS_ALPN, SYNC_ALPN,
+    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, request,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -246,18 +246,24 @@ impl HubClient {
                 payload: r.payload,
             })
             .collect();
-        match self
-            .secrets(
-                &hub,
-                SecretsRequest::Push {
-                    collection,
-                    records,
-                },
-            )
-            .await?
-        {
-            SecretsResponse::Pushed => Ok(()),
-            other => Err(unexpected(other)),
+        //provider secrets need their own scope
+        if collection == COLLECTION_PROVIDERS {
+            let request = SecretsRequest::Push {
+                collection,
+                records,
+            };
+            return match self.secrets(&hub, request).await? {
+                SecretsResponse::Pushed => Ok(()),
+                other => Err(unexpected(other)),
+            };
+        }
+        let request = SyncRequest::Push {
+            collection,
+            records,
+        };
+        match self.data(&hub, request).await? {
+            SyncResponse::Pushed => Ok(()),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
     }
 
@@ -267,28 +273,51 @@ impl HubClient {
         collection: String,
         since: u64,
     ) -> Result<PullPage, HubError> {
-        match self
-            .secrets(&hub, SecretsRequest::Pull { collection, since })
-            .await?
-        {
-            SecretsResponse::Records {
-                records,
-                cursor,
-                more,
-            } => Ok(PullPage {
-                records: records
-                    .into_iter()
-                    .map(|r| SyncRecord {
-                        id: r.id,
-                        updated_at: r.updated_at,
-                        deleted: r.deleted,
-                        payload: r.payload,
-                    })
-                    .collect(),
-                cursor,
-                more,
-            }),
-            other => Err(unexpected(other)),
+        let (records, cursor, more) = if collection == COLLECTION_PROVIDERS {
+            match self
+                .secrets(&hub, SecretsRequest::Pull { collection, since })
+                .await?
+            {
+                SecretsResponse::Records {
+                    records,
+                    cursor,
+                    more,
+                } => (records, cursor, more),
+                other => return Err(unexpected(other)),
+            }
+        } else {
+            match self
+                .data(&hub, SyncRequest::Pull { collection, since })
+                .await?
+            {
+                SyncResponse::Records {
+                    records,
+                    cursor,
+                    more,
+                } => (records, cursor, more),
+                other => return Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+            }
+        };
+        Ok(PullPage {
+            records: records
+                .into_iter()
+                .map(|r| SyncRecord {
+                    id: r.id,
+                    updated_at: r.updated_at,
+                    deleted: r.deleted,
+                    payload: r.payload,
+                })
+                .collect(),
+            cursor,
+            more,
+        })
+    }
+
+    //waits until the hub has anything newer than since
+    pub async fn watch(&self, hub: PairedHub, since: u64) -> Result<u64, HubError> {
+        match self.data(&hub, SyncRequest::Watch { since }).await? {
+            SyncResponse::Changed { cursor } => Ok(cursor),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
     }
 
@@ -415,6 +444,16 @@ impl HubClient {
             }
         }
         Err(HubError::Unreachable("connection keeps closing".into()))
+    }
+
+    async fn data(&self, hub: &PairedHub, request: SyncRequest) -> Result<SyncResponse, HubError> {
+        let mut stream = self.stream(hub, SYNC_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            SyncResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Ok(other),
+        }
     }
 
     async fn secrets(

@@ -3675,7 +3675,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opera-hub"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -3709,7 +3709,7 @@ dependencies = [
 
 [[package]]
 name = "opera-hub-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3730,7 +3730,7 @@ dependencies = [
 
 [[package]]
 name = "opera-hub-proto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "iroh",

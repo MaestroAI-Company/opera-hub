@@ -11,7 +11,7 @@ use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
     ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink, SECRETS_ALPN,
-    UNAUTHORIZED, hub_addr,
+    SYNC_ALPN, UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -22,6 +22,7 @@ use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
 use crate::store::Store;
+use crate::sync::DataSync;
 
 async fn bind(config: &Config, key: Option<SecretKey>, port: Option<u16>) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0).relay_mode(config.relay_mode());
@@ -98,6 +99,10 @@ pub async fn run_with_targets(
                 },
                 &store,
             ),
+        )
+        .accept(
+            SYNC_ALPN,
+            OverIroh::new(DataSync { db: db.clone() }, &store),
         )
         .accept(
             SECRETS_ALPN,

@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use tokio::sync::watch;
+
 use anyhow::{Context, Result, anyhow, bail};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -10,11 +12,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 const DB_FILE: &str = "hub.db";
 const KEY_FILE: &str = "data.key";
 const NONCE_BYTES: usize = 24;
+//keeps a pull page well under the frame limit
+const PULL_BYTES: usize = 8 * 1024 * 1024;
 
 //contents sealed per row
 pub struct Db {
     conn: Mutex<Connection>,
     cipher: XChaCha20Poly1305,
+    //latest seq so watchers wake on writes
+    changes: watch::Sender<u64>,
 }
 
 impl Db {
@@ -47,27 +53,35 @@ impl Db {
             );",
         )?;
         let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| anyhow!("bad data key"))?;
+        let latest: u64 =
+            conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM records", [], |row| {
+                row.get(0)
+            })?;
         Ok(Self {
             conn: Mutex::new(conn),
             cipher,
+            changes: watch::Sender::new(latest),
         })
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     pub fn push(&self, collection: &str, device: &str, records: &[Record]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let mut latest = None;
         for record in records {
-            let current: Option<(u64, String)> = tx
+            let current: Option<u64> = tx
                 .query_row(
-                    "SELECT updated_at, device FROM records WHERE collection = ?1 AND id = ?2",
+                    "SELECT updated_at FROM records WHERE collection = ?1 AND id = ?2",
                     params![collection, record.id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| row.get(0),
                 )
                 .optional()?;
-            //ties go to the higher device id
-            if let Some(current) = current
-                && (current.0, current.1.as_str()) >= (record.updated_at, device)
-            {
+            //ties keep the first so echoes never bump seq
+            if current.is_some_and(|current| current >= record.updated_at) {
                 continue;
             }
             let seq: u64 =
@@ -85,8 +99,12 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![collection, record.id, seq, record.updated_at, device, record.deleted, payload],
             )?;
+            latest = Some(seq);
         }
         tx.commit()?;
+        if let Some(seq) = latest {
+            self.changes.send_replace(seq);
+        }
         Ok(())
     }
 
@@ -114,12 +132,14 @@ impl Db {
         let mut records = Vec::new();
         let mut cursor = since;
         let mut more = false;
+        let mut bytes = 0;
         for row in rows {
             let (id, seq, updated_at, deleted, sealed) = row?;
-            if records.len() == limit {
+            if records.len() == limit || bytes > PULL_BYTES {
                 more = true;
                 break;
             }
+            bytes += sealed.as_ref().map_or(0, Vec::len);
             let payload = match sealed {
                 Some(sealed) => Some(String::from_utf8(
                     self.unseal(&aad(collection, &id), &sealed)?,
@@ -275,6 +295,9 @@ mod tests {
         db.push("providers", "a", &[record("x", 10, "new")])
             .unwrap();
         db.push("providers", "b", &[record("x", 5, "old")]).unwrap();
+        //a tie keeps the first write
+        db.push("providers", "z", &[record("x", 10, "echo")])
+            .unwrap();
         let (records, cursor, more) = db.pull("providers", 0, 10).unwrap();
         assert_eq!(records, vec![record("x", 10, "new")]);
         assert!(!more);

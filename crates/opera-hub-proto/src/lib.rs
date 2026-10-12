@@ -14,9 +14,12 @@ pub const HUB_ALPN: &[u8] = b"opera/hub/1";
 pub const ADMIN_ALPN: &[u8] = b"opera/admin/1";
 pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
 pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
+pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
+//everyday data under the sync scope
+pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 
 //close code for unknown devices or missing scopes
 pub const UNAUTHORIZED: u32 = 401;
@@ -30,7 +33,8 @@ pub const SCOPE_ADMIN: &str = "admin";
 pub const KIND_PHONE: &str = "phone";
 pub const KIND_DESKTOP: &str = "desktop";
 
-const MAX_FRAME_BYTES: u32 = 1024 * 1024;
+//images travel as blob records
+const MAX_FRAME_BYTES: u32 = 32 * 1024 * 1024;
 const LINK_PREFIX: &str = "opera://hub/pair";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -158,6 +162,40 @@ pub enum SecretsResponse {
         token: Option<AccessToken>,
     },
     GrantDropped,
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SyncRequest {
+    Push {
+        collection: String,
+        records: Vec<Record>,
+    },
+    Pull {
+        collection: String,
+        since: u64,
+    },
+    //answers once anything newer than since lands
+    Watch {
+        since: u64,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SyncResponse {
+    Pushed,
+    Records {
+        records: Vec<Record>,
+        cursor: u64,
+        more: bool,
+    },
+    Changed {
+        cursor: u64,
+    },
     Error {
         message: String,
     },

@@ -183,7 +183,7 @@ async fn providers_secrets_and_oauth() {
         .unwrap();
     assert_eq!(page.records.len(), 1);
     assert_eq!(page.records[0].payload.as_deref(), Some("new"));
-    let unknown = phone.pull(hub_ref.clone(), "conversations".into(), 0).await;
+    let unknown = phone.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");
 
     //one refresh for concurrent devices

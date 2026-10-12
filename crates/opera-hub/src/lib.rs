@@ -5,3 +5,4 @@ pub mod protocols;
 pub mod providers;
 pub mod secrets;
 pub mod store;
+pub mod sync;
