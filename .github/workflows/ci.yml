@@ -24,3 +24,7 @@ jobs:
 
       - name: Build
         run: cargo build --locked --release
+
+      # the pairing test reaches n0 address lookup
+      - name: Test
+        run: cargo test --locked

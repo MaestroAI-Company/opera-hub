@@ -1,18 +1,22 @@
 use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{ensure, Result};
-use iroh::endpoint::{presets, Connection};
+use anyhow::{Result, ensure};
+use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
+use opera_hub_proto::{
+    ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PairingLink, UNAUTHORIZED, hub_addr,
+};
 use tracing::info;
 
 use crate::config::{self, Config};
-
-pub const PING_ALPN: &[u8] = b"opera/ping/0";
+use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
+use crate::store::Store;
 
 async fn bind(config: &Config, key: Option<SecretKey>, port: Option<u16>) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0).relay_mode(config.relay_mode());
@@ -31,7 +35,11 @@ pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<
     let config = Config::load(data_dir)?;
     let key = config::load_or_create_key(data_dir)?;
     let endpoint = bind(&config, Some(key), config.port).await?;
-    info!("hub {} started, data in {}", endpoint.id(), data_dir.display());
+    info!(
+        "hub {} started, data in {}",
+        endpoint.id(),
+        data_dir.display()
+    );
 
     //relays reconnect if offline at boot
     tokio::spawn({
@@ -42,7 +50,40 @@ pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<
         }
     });
 
-    let router = Router::builder(endpoint).accept(PING_ALPN, Ping).spawn();
+    let store = Arc::new(Store::new(data_dir));
+    let name: Arc<str> = config.hub_name().into();
+    let router = Router::builder(endpoint)
+        .accept(PING_ALPN, OverIroh::new(Ping, &store))
+        .accept(
+            PAIR_ALPN,
+            OverIroh::new(
+                Pair {
+                    store: store.clone(),
+                    name: name.clone(),
+                },
+                &store,
+            ),
+        )
+        .accept(
+            HUB_ALPN,
+            OverIroh::new(
+                Session {
+                    store: store.clone(),
+                    name,
+                },
+                &store,
+            ),
+        )
+        .accept(
+            ADMIN_ALPN,
+            OverIroh::new(
+                Admin {
+                    store: store.clone(),
+                },
+                &store,
+            ),
+        )
+        .spawn();
     shutdown.await;
     info!("hub stopping");
     router.shutdown().await?;
@@ -53,27 +94,36 @@ pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<
 pub fn ticket(data_dir: &Path) -> Result<EndpointTicket> {
     let config = Config::load(data_dir)?;
     let key = config::load_or_create_key(data_dir)?;
-    let addr = config
-        .relays
-        .iter()
-        .fold(EndpointAddr::new(key.public()), |addr, url| addr.with_relay_url(url.clone()));
-    Ok(EndpointTicket::new(addr))
+    Ok(EndpointTicket::new(hub_addr(key.public(), &config.relays)))
+}
+
+pub fn pairing_link(data_dir: &Path) -> Result<PairingLink> {
+    let config = Config::load(data_dir)?;
+    let key = config::load_or_create_key(data_dir)?;
+    let secret = Store::new(data_dir).start_pairing()?;
+    Ok(PairingLink {
+        hub: key.public(),
+        relays: config.relays,
+        secret,
+    })
 }
 
 pub async fn ping(data_dir: &Path, ticket: EndpointTicket, count: u32) -> Result<()> {
     let config = Config::load(data_dir)?;
     let endpoint = bind(&config, None, None).await?;
     let started = Instant::now();
-    let conn = endpoint.connect(ticket.endpoint_addr().clone(), PING_ALPN).await?;
+    let conn = endpoint
+        .connect(ticket.endpoint_addr().clone(), PING_ALPN)
+        .await?;
     println!("connected in {:?}", started.elapsed());
 
+    let (mut send, mut recv) = conn.open_bi().await?;
     for i in 1..=count {
         let started = Instant::now();
-        let (mut send, mut recv) = conn.open_bi().await?;
         send.write_all(b"ping").await?;
-        send.finish()?;
-        let echo = recv.read_to_end(16).await?;
-        ensure!(echo == b"ping", "hub answered with unexpected bytes");
+        let mut echo = [0u8; 4];
+        recv.read_exact(&mut echo).await?;
+        ensure!(&echo == b"ping", "hub answered with unexpected bytes");
         println!("{i}: {:?} via {}", started.elapsed(), path_kind(&conn));
         if i < count {
             //leaves time for hole punching
@@ -81,6 +131,7 @@ pub async fn ping(data_dir: &Path, ticket: EndpointTicket, count: u32) -> Result
         }
     }
 
+    send.finish()?;
     conn.close(0u32.into(), b"bye");
     endpoint.close().await;
     Ok(())
@@ -94,17 +145,43 @@ fn path_kind(conn: &Connection) -> &'static str {
     }
 }
 
-//reachability check
-#[derive(Debug, Clone)]
-struct Ping;
+fn user_error(e: anyhow::Error) -> AcceptError {
+    AcceptError::from_boxed(e.into())
+}
 
-impl ProtocolHandler for Ping {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        info!("ping from {}", conn.remote_id().fmt_short());
-        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-            tokio::io::copy(&mut recv, &mut send).await?;
-            send.finish()?;
+//one iroh stream per protocol session
+#[derive(Debug, Clone)]
+struct OverIroh<P> {
+    protocol: P,
+    store: Arc<Store>,
+}
+
+impl<P> OverIroh<P> {
+    fn new(protocol: P, store: &Arc<Store>) -> Self {
+        Self {
+            protocol,
+            store: store.clone(),
         }
+    }
+}
+
+impl<P: Protocol + std::fmt::Debug> ProtocolHandler for OverIroh<P> {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let peer = Peer {
+            id: conn.remote_id().to_string(),
+        };
+        if !admit(&self.store, &peer, P::ACCESS).map_err(user_error)? {
+            conn.close(UNAUTHORIZED.into(), b"unauthorized");
+            return Ok(());
+        }
+        let (mut send, recv) = conn.accept_bi().await?;
+        self.protocol
+            .serve(peer, recv, &mut send)
+            .await
+            .map_err(user_error)?;
+        send.finish()?;
+        //client closes after the last answer
+        conn.closed().await;
         Ok(())
     }
 }

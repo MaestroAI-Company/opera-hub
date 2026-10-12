@@ -1,18 +1,26 @@
-mod config;
-mod hub;
 mod service;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use iroh_tickets::endpoint::EndpointTicket;
+use opera_hub::store::{self, Store};
+use opera_hub::{config, hub};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "opera-hub", version, about = "Opera Hub, the sync server for Opera devices")]
+#[command(
+    name = "opera-hub",
+    version,
+    about = "Opera Hub, the sync server for Opera devices"
+)]
 struct Cli {
-    #[arg(long, global = true, help = "Hub data directory, defaults to the OS data directory")]
+    #[arg(
+        long,
+        global = true,
+        help = "Hub data directory, defaults to the OS data directory"
+    )]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -25,7 +33,14 @@ enum Command {
         #[arg(long, hide = true)]
         service: bool,
     },
-    #[command(about = "Print the hub ticket and its QR code")]
+    #[command(about = "Show a one-time QR code to pair a device")]
+    Pair,
+    #[command(about = "List or remove paired devices")]
+    Devices {
+        #[command(subcommand)]
+        action: Option<DevicesAction>,
+    },
+    #[command(about = "Print the hub ticket and its QR code, for ping")]
     Ticket,
     #[command(about = "Check that a hub is reachable")]
     Ping {
@@ -37,6 +52,15 @@ enum Command {
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesAction {
+    List,
+    #[command(about = "Unpair a device by id or id prefix")]
+    Remove {
+        id: String,
     },
 }
 
@@ -65,6 +89,17 @@ fn main() -> Result<()> {
             }
             runtime()?.block_on(hub::run(&data_dir, shutdown_signal()))
         }
+        Command::Pair => {
+            let link = hub::pairing_link(&data_dir)?.to_string();
+            qr2term::print_qr(&link)?;
+            println!("{link}");
+            println!(
+                "scan it from Opera within {} minutes, the hub must be running",
+                store::PAIRING_TTL.as_secs() / 60
+            );
+            Ok(())
+        }
+        Command::Devices { action } => devices(&data_dir, action.unwrap_or(DevicesAction::List)),
         Command::Ticket => {
             let ticket = hub::ticket(&data_dir)?.to_string();
             qr2term::print_qr(&ticket)?;
@@ -85,6 +120,43 @@ fn main() -> Result<()> {
     }
 }
 
+fn devices(data_dir: &Path, action: DevicesAction) -> Result<()> {
+    let store = Store::new(data_dir);
+    match action {
+        DevicesAction::List => {
+            let devices = store.devices()?;
+            if devices.is_empty() {
+                println!("no paired device, run: opera-hub pair");
+            }
+            for device in devices {
+                println!(
+                    "{}  {} ({}) {}",
+                    device.id,
+                    device.name,
+                    device.kind,
+                    device.scopes.join(",")
+                );
+            }
+        }
+        DevicesAction::Remove { id } => {
+            let matches: Vec<_> = store
+                .devices()?
+                .into_iter()
+                .filter(|d| d.id.starts_with(&id))
+                .collect();
+            match matches.as_slice() {
+                [device] => {
+                    store.remove_device(&device.id)?;
+                    println!("removed {}", device.name);
+                }
+                [] => bail!("no paired device matches {id}"),
+                _ => bail!("{id} matches several devices, use a longer prefix"),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
 }
@@ -99,7 +171,10 @@ fn init_logging(data_dir: &Path, to_file: bool) -> Result<()> {
             .create(true)
             .append(true)
             .open(data_dir.join("hub.log"))?;
-        builder.with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+        builder
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
     } else {
         builder.with_writer(std::io::stderr).init();
     }
@@ -110,7 +185,7 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         //systemd and launchd stop with sigterm
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut term = signal(SignalKind::terminate()).expect("sigterm handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}

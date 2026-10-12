@@ -50,7 +50,14 @@ pub fn install(data_dir: &Path) -> Result<()> {
     //sc create ignores restart policies
     #[cfg(windows)]
     std::process::Command::new("sc.exe")
-        .args(["failure", LABEL, "reset=", "86400", "actions=", "restart/10000"])
+        .args([
+            "failure",
+            LABEL,
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/10000",
+        ])
         .status()?;
     manager.start(ServiceStartCtx { label: label() })?;
     println!("service installed and started");
@@ -145,12 +152,16 @@ pub mod windows {
             0,
         ))?;
         let runtime = tokio::runtime::Runtime::new()?;
-        let result = runtime.block_on(crate::hub::run(data_dir, async {
+        let result = runtime.block_on(opera_hub::hub::run(data_dir, async {
             let _ = stop_rx.await;
         }));
         //non zero exit triggers scm restart
         let code = if result.is_ok() { 0 } else { 1 };
-        handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty(), code))?;
+        handle.set_service_status(status(
+            ServiceState::Stopped,
+            ServiceControlAccept::empty(),
+            code,
+        ))?;
         result
     }
 

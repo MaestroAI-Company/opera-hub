@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use iroh::{RelayMode, RelayUrl, SecretKey};
 use serde::Deserialize;
@@ -16,16 +16,26 @@ pub struct Config {
     pub relays: Vec<RelayUrl>,
     //fixed port for a firewall rule
     pub port: Option<u16>,
+    //shown to devices hostname by default
+    pub name: Option<String>,
 }
 
 impl Config {
     pub fn load(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join(CONFIG_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("invalid {}", path.display())),
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))
+            }
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
         }
+    }
+
+    pub fn hub_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned())
     }
 
     pub fn relay_mode(&self) -> RelayMode {
