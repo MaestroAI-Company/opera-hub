@@ -1,0 +1,22 @@
+[package]
+name = "opera-hub"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6"
+iroh = "1.3"
+iroh-tickets = "1"
+qr2term = "0.3.3"
+serde = { version = "1.0.229", features = ["derive"] }
+service-manager = "0.11.0"
+tokio = { version = "1.53.2", features = ["full"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target."cfg(windows)".dependencies]
+windows-service = "0.8"
