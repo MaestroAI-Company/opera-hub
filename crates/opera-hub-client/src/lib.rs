@@ -21,6 +21,8 @@ uniffi::setup_scaffolding!();
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+//slowest relay upload still allowed to finish
+const MIN_UPLOAD_BYTES_PER_SEC: usize = 32 * 1024;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
@@ -483,18 +485,18 @@ impl Stream {
         &mut self,
         req: &Req,
     ) -> Result<Resp, HubError> {
-        within(
-            REQUEST_TIMEOUT,
-            request(&mut self.recv, &mut self.send, req),
-        )
-        .await?
-        .map_err(|e| {
-            if refused(&self.conn) {
-                HubError::Unauthorized
-            } else {
-                unreachable(e)
-            }
-        })
+        //big uploads get time while a silent hub fails fast
+        let size = serde_json::to_vec(req).map_or(0, |bytes| bytes.len());
+        let limit = REQUEST_TIMEOUT + Duration::from_secs((size / MIN_UPLOAD_BYTES_PER_SEC) as u64);
+        within(limit, request(&mut self.recv, &mut self.send, req))
+            .await?
+            .map_err(|e| {
+                if refused(&self.conn) {
+                    HubError::Unauthorized
+                } else {
+                    unreachable(e)
+                }
+            })
     }
 
     fn finish(mut self) {

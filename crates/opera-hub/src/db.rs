@@ -13,7 +13,7 @@ const DB_FILE: &str = "hub.db";
 const KEY_FILE: &str = "data.key";
 const NONCE_BYTES: usize = 24;
 //keeps a pull page well under the frame limit
-const PULL_BYTES: usize = 8 * 1024 * 1024;
+const PULL_BYTES: usize = 2 * 1024 * 1024;
 
 //contents sealed per row
 pub struct Db {
