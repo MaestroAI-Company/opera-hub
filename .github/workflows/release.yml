@@ -69,9 +69,12 @@ jobs:
         run: |
           mkdir dist
           cp target/release/${{ matrix.bin }} dist/${{ matrix.name }}
-          # login start needs the windowless twin next to it
+          # background start needs the tray twin next to it
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/release/opera-hubw.exe dist/opera-hubw-windows-x86_64.exe
+          fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp target/release/opera-hubw dist/opera-hubw-macos-aarch64
           fi
 
       - uses: actions/upload-artifact@v4

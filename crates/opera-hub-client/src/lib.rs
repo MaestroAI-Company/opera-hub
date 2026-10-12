@@ -1,7 +1,9 @@
 mod proxy;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
@@ -17,6 +19,9 @@ use tokio::sync::{Mutex, OnceCell};
 
 uniffi::setup_scaffolding!();
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum HubError {
@@ -30,6 +35,8 @@ pub enum HubError {
     Unauthorized,
     #[error("hub unreachable: {0}")]
     Unreachable(String),
+    #[error("the hub is too old for this app, update it")]
+    Outdated,
     #[error("{0}")]
     Internal(String),
 }
@@ -140,11 +147,8 @@ impl HubClient {
             .parse()
             .map_err(|e| HubError::InvalidLink(format!("{e:#}")))?;
         let conn = self
-            .endpoint()
-            .await?
             .connect(hub_addr(link.hub, &link.relays), PAIR_ALPN)
-            .await
-            .map_err(unreachable)?;
+            .await?;
         let (send, recv) = conn.open_bi().await.map_err(unreachable)?;
         let mut stream = Stream {
             conn: conn.clone(),
@@ -376,6 +380,19 @@ impl HubClient {
             .await
     }
 
+    async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<Connection, HubError> {
+        let endpoint = self.endpoint().await?;
+        let conn = within(CONNECT_TIMEOUT, endpoint.connect(addr, alpn)).await?;
+        conn.map_err(|e| {
+            //tls alert for an alpn the hub does not serve
+            if e.to_string().contains("error 120") {
+                HubError::Outdated
+            } else {
+                unreachable(e)
+            }
+        })
+    }
+
     //reconnects once if the connection died
     async fn stream(&self, hub: &PairedHub, alpn: &'static [u8]) -> Result<Stream, HubError> {
         let key = (hub.id.clone(), alpn);
@@ -385,12 +402,7 @@ impl HubClient {
                 match connections.get(&key) {
                     Some(conn) if conn.close_reason().is_none() => conn.clone(),
                     _ => {
-                        let conn = self
-                            .endpoint()
-                            .await?
-                            .connect(paired_addr(hub)?, alpn)
-                            .await
-                            .map_err(unreachable)?;
+                        let conn = self.connect(paired_addr(hub)?, alpn).await?;
                         connections.insert(key.clone(), conn.clone());
                         conn
                     }
@@ -432,15 +444,18 @@ impl Stream {
         &mut self,
         req: &Req,
     ) -> Result<Resp, HubError> {
-        request(&mut self.recv, &mut self.send, req)
-            .await
-            .map_err(|e| {
-                if refused(&self.conn) {
-                    HubError::Unauthorized
-                } else {
-                    unreachable(e)
-                }
-            })
+        within(
+            REQUEST_TIMEOUT,
+            request(&mut self.recv, &mut self.send, req),
+        )
+        .await?
+        .map_err(|e| {
+            if refused(&self.conn) {
+                HubError::Unauthorized
+            } else {
+                unreachable(e)
+            }
+        })
     }
 
     fn finish(mut self) {
@@ -472,6 +487,13 @@ fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
 
 fn unexpected(response: SecretsResponse) -> HubError {
     HubError::Internal(format!("unexpected answer {response:?}"))
+}
+
+//a silent hub must never hang the app
+async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Result<T, HubError> {
+    tokio::time::timeout(limit, future)
+        .await
+        .map_err(|_| HubError::Unreachable("the hub did not answer in time".into()))
 }
 
 fn unreachable(e: impl std::fmt::Display) -> HubError {

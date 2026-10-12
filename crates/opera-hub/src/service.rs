@@ -25,11 +25,22 @@ mod imp {
     }
 
     pub fn install(data_dir: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec!["--data-dir".into(), data_dir.into(), "run".into()];
+        let exe = std::env::current_exe()?;
+        //macos gets the tray twin, linux stays headless
+        let (program, args): (_, Vec<OsString>) = if cfg!(target_os = "macos") {
+            let tray = exe.with_file_name("opera-hubw");
+            anyhow::ensure!(tray.exists(), "opera-hubw is missing next to opera-hub");
+            (tray, vec!["--data-dir".into(), data_dir.into()])
+        } else {
+            (
+                exe,
+                vec!["--data-dir".into(), data_dir.into(), "run".into()],
+            )
+        };
         let manager = manager()?;
         manager.install(ServiceInstallCtx {
             label: label(),
-            program: std::env::current_exe()?,
+            program,
             args,
             contents: None,
             username: None,
