@@ -76,7 +76,7 @@ fn icon() -> Result<Icon> {
     rgba.truncate(info.buffer_size());
     //black disappears on a dark windows taskbar
     if cfg!(windows) {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[..3].copy_from_slice(&OPERA_RED);
         }
     }

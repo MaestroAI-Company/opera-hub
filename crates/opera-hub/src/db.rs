@@ -6,7 +6,6 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use opera_hub_proto::{OAuthGrant, Record};
 use rusqlite::{Connection, OptionalExtension, params};
-use tracing::warn;
 
 const DB_FILE: &str = "hub.db";
 const KEY_FILE: &str = "data.key";
@@ -220,7 +219,7 @@ fn data_key(data_dir: &Path) -> Result<[u8; 32]> {
         Err(e) if data_dir.join(DB_FILE).exists() => {
             bail!("os keychain unavailable and {DB_FILE} already exists: {e}")
         }
-        Err(e) => warn!("os keychain unavailable, using {}: {e}", file.display()),
+        Err(e) => tracing::warn!("os keychain unavailable, using {}: {e}", file.display()),
     }
     let mut key = [0u8; 32];
     getrandom::fill(&mut key).map_err(|e| anyhow!("no system randomness: {e}"))?;
