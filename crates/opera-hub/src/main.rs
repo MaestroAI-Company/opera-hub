@@ -7,7 +7,6 @@ use clap::{Parser, Subcommand};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub::store::{self, Store};
 use opera_hub::{config, hub};
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
@@ -29,10 +28,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "Run the hub in the foreground")]
-    Run {
-        #[arg(long, hide = true)]
-        service: bool,
-    },
+    Run,
     #[command(about = "Show a one-time QR code to pair a device")]
     Pair,
     #[command(about = "List or remove paired devices")]
@@ -81,12 +77,8 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
-        Command::Run { service } => {
-            init_logging(&data_dir, service)?;
-            #[cfg(windows)]
-            if service {
-                return service::windows::run(data_dir);
-            }
+        Command::Run => {
+            hub::init_logging(&data_dir, false)?;
             runtime()?.block_on(hub::run(&data_dir, shutdown_signal()))
         }
         Command::Pair => {
@@ -107,13 +99,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Ping { ticket, count } => {
-            init_logging(&data_dir, false)?;
+            hub::init_logging(&data_dir, false)?;
             runtime()?.block_on(hub::ping(&data_dir, ticket, count))
         }
         Command::Service { action } => match action {
             ServiceAction::Install => service::install(&data_dir),
             ServiceAction::Uninstall => service::uninstall(),
-            ServiceAction::Start => service::start(),
+            ServiceAction::Start => service::start(&data_dir),
             ServiceAction::Stop => service::stop(),
             ServiceAction::Status => service::status(),
         },
@@ -159,26 +151,6 @@ fn devices(data_dir: &Path, action: DevicesAction) -> Result<()> {
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
-}
-
-//services have no console
-fn init_logging(data_dir: &Path, to_file: bool) -> Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,iroh=warn".into());
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    if to_file {
-        std::fs::create_dir_all(data_dir)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(data_dir.join("hub.log"))?;
-        builder
-            .with_ansi(false)
-            .with_writer(std::sync::Mutex::new(file))
-            .init();
-    } else {
-        builder.with_writer(std::io::stderr).init();
-    }
-    Ok(())
 }
 
 async fn shutdown_signal() {

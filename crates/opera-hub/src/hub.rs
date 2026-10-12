@@ -14,6 +14,7 @@ use opera_hub_proto::{
     UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 use crate::config::{self, Config};
 use crate::db::Db;
@@ -225,4 +226,24 @@ impl<P: Protocol + std::fmt::Debug> ProtocolHandler for OverIroh<P> {
         }
         Ok(())
     }
+}
+
+//windowless runs have no console
+pub fn init_logging(data_dir: &Path, to_file: bool) -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,iroh=warn".into());
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if to_file {
+        std::fs::create_dir_all(data_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join("hub.log"))?;
+        builder
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+    } else {
+        builder.with_writer(std::io::stderr).init();
+    }
+    Ok(())
 }
