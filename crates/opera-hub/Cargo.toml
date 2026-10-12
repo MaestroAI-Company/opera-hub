@@ -1,19 +1,24 @@
 [package]
 name = "opera-hub"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 
 [dependencies]
 anyhow = "1.0.104"
+chacha20poly1305 = "0.11"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6"
 gethostname = "1"
 getrandom = "0.4"
 iroh = "1.3"
 iroh-tickets = "1"
-opera-hub-proto = { version = "0.2.0", path = "../opera-hub-proto" }
+keyring = "4"
+opera-hub-proto = { version = "0.3.0", path = "../opera-hub-proto" }
 qr2term = "0.3.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "form"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 service-manager = "0.11.0"
@@ -21,6 +26,7 @@ tokio = { version = "1.53.2", features = ["full"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+webpki-roots = "1"
 
 [target."cfg(windows)".dependencies]
 windows-service = "0.8"

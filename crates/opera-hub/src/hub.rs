@@ -10,12 +10,16 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
-    ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PairingLink, UNAUTHORIZED, hub_addr,
+    ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink, SECRETS_ALPN,
+    UNAUTHORIZED, hub_addr,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{self, Config};
+use crate::db::Db;
 use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
+use crate::providers::{Providers, Target, default_targets};
+use crate::secrets::{Secrets, http_client};
 use crate::store::Store;
 
 async fn bind(config: &Config, key: Option<SecretKey>, port: Option<u16>) -> Result<Endpoint> {
@@ -32,6 +36,15 @@ async fn bind(config: &Config, key: Option<SecretKey>, port: Option<u16>) -> Res
 }
 
 pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<()> {
+    run_with_targets(data_dir, shutdown, default_targets()).await
+}
+
+//tests point the relay at fake providers
+pub async fn run_with_targets(
+    data_dir: &Path,
+    shutdown: impl Future<Output = ()>,
+    targets: Vec<Target>,
+) -> Result<()> {
     let config = Config::load(data_dir)?;
     let key = config::load_or_create_key(data_dir)?;
     let endpoint = bind(&config, Some(key), config.port).await?;
@@ -51,6 +64,8 @@ pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<
     });
 
     let store = Arc::new(Store::new(data_dir));
+    let db = Arc::new(Db::open(data_dir)?);
+    let http = http_client()?;
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))
@@ -79,6 +94,27 @@ pub async fn run(data_dir: &Path, shutdown: impl Future<Output = ()>) -> Result<
             OverIroh::new(
                 Admin {
                     store: store.clone(),
+                },
+                &store,
+            ),
+        )
+        .accept(
+            SECRETS_ALPN,
+            OverIroh::new(
+                Secrets {
+                    db,
+                    http: http.clone(),
+                    refreshing: Default::default(),
+                },
+                &store,
+            ),
+        )
+        .accept(
+            PROVIDERS_ALPN,
+            OverIroh::new(
+                Providers {
+                    http,
+                    targets: Arc::new(targets),
                 },
                 &store,
             ),
@@ -149,7 +185,7 @@ fn user_error(e: anyhow::Error) -> AcceptError {
     AcceptError::from_boxed(e.into())
 }
 
-//one iroh stream per protocol session
+//each bi stream is one protocol session
 #[derive(Debug, Clone)]
 struct OverIroh<P> {
     protocol: P,
@@ -174,14 +210,19 @@ impl<P: Protocol + std::fmt::Debug> ProtocolHandler for OverIroh<P> {
             conn.close(UNAUTHORIZED.into(), b"unauthorized");
             return Ok(());
         }
-        let (mut send, recv) = conn.accept_bi().await?;
-        self.protocol
-            .serve(peer, recv, &mut send)
-            .await
-            .map_err(user_error)?;
-        send.finish()?;
-        //client closes after the last answer
-        conn.closed().await;
+        //ends when the client closes the connection
+        while let Ok((mut send, recv)) = conn.accept_bi().await {
+            let protocol = self.protocol.clone();
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                match protocol.serve(peer, recv, &mut send).await {
+                    Ok(()) => {
+                        let _ = send.finish();
+                    }
+                    Err(e) => warn!("stream failed: {e:#}"),
+                }
+            });
+        }
         Ok(())
     }
 }

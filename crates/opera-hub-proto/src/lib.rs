@@ -12,6 +12,11 @@ pub const PING_ALPN: &[u8] = b"opera/ping/0";
 pub const PAIR_ALPN: &[u8] = b"opera/pair/1";
 pub const HUB_ALPN: &[u8] = b"opera/hub/1";
 pub const ADMIN_ALPN: &[u8] = b"opera/admin/1";
+pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
+pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
+
+//provider configs with their keys and tokens
+pub const COLLECTION_PROVIDERS: &str = "providers";
 
 //close code for unknown devices or missing scopes
 pub const UNAUTHORIZED: u32 = 401;
@@ -25,7 +30,7 @@ pub const SCOPE_ADMIN: &str = "admin";
 pub const KIND_PHONE: &str = "phone";
 pub const KIND_DESKTOP: &str = "desktop";
 
-const MAX_FRAME_BYTES: u32 = 64 * 1024;
+const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 const LINK_PREFIX: &str = "opera://hub/pair";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,6 +90,118 @@ pub struct DeviceInfo {
     //none when paired from the hub itself
     pub paired_by: Option<String>,
     pub last_seen: Option<u64>,
+}
+
+//last writer wins on updated_at then device
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    pub id: String,
+    //unix millis set by the writing device
+    pub updated_at: u64,
+    pub deleted: bool,
+    //json text or none when deleted
+    pub payload: Option<String>,
+}
+
+//refresh token stays on the hub
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthGrant {
+    pub server_id: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub refresh_token: String,
+    pub access_token: Option<String>,
+    //unix millis
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessToken {
+    pub access_token: String,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SecretsRequest {
+    Push {
+        collection: String,
+        records: Vec<Record>,
+    },
+    Pull {
+        collection: String,
+        since: u64,
+    },
+    PutGrant {
+        grant: OAuthGrant,
+    },
+    AccessToken {
+        server_id: String,
+    },
+    DropGrant {
+        server_id: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SecretsResponse {
+    Pushed,
+    Records {
+        records: Vec<Record>,
+        cursor: u64,
+        more: bool,
+    },
+    GrantSaved,
+    //none means signing in again
+    AccessToken {
+        token: Option<AccessToken>,
+    },
+    GrantDropped,
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub name: String,
+    //ollama or openai protocol
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardHead {
+    pub provider: String,
+    pub method: String,
+    //path below the provider base url
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+}
+
+//raw body follows until stream end
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProvidersRequest {
+    List,
+    Forward { head: ForwardHead },
+}
+
+//raw body follows until stream end
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProvidersResponse {
+    Providers {
+        providers: Vec<ProviderInfo>,
+    },
+    Response {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 //length prefixed json for any stream

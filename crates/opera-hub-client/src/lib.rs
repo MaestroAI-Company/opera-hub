@@ -1,14 +1,19 @@
+mod proxy;
+
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use opera_hub_proto::{
-    ADMIN_ALPN, AdminRequest, AdminResponse, HUB_ALPN, HubRequest, HubResponse, PAIR_ALPN,
-    PairRejection, PairRequest, PairResponse, PairingLink, UNAUTHORIZED, hub_addr, request,
+    ADMIN_ALPN, AdminRequest, AdminResponse, HUB_ALPN, HubRequest, HubResponse, OAuthGrant,
+    PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink,
+    ProvidersRequest, ProvidersResponse, Record, SECRETS_ALPN, SecretsRequest, SecretsResponse,
+    UNAUTHORIZED, hub_addr, request,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 uniffi::setup_scaffolding!();
 
@@ -55,11 +60,58 @@ pub struct HubDevice {
     pub last_seen: Option<u64>,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SyncRecord {
+    pub id: String,
+    pub updated_at: u64,
+    pub deleted: bool,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PullPage {
+    pub records: Vec<SyncRecord>,
+    pub cursor: u64,
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpGrant {
+    pub server_id: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub refresh_token: String,
+    pub access_token: Option<String>,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct McpAccessToken {
+    pub access_token: String,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HubProvider {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ProxyInfo {
+    pub port: u16,
+    pub token: String,
+}
+
 #[derive(uniffi::Object)]
 pub struct HubClient {
     secret_key: SecretKey,
     //binding needs the tokio runtime
     endpoint: OnceCell<Endpoint>,
+    //kept open so paths can turn direct
+    connections: Mutex<HashMap<(String, &'static [u8]), Connection>>,
+    proxy: Mutex<Option<ProxyInfo>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -73,6 +125,8 @@ impl HubClient {
         Ok(Arc::new(Self {
             secret_key: SecretKey::from_bytes(&bytes),
             endpoint: OnceCell::new(),
+            connections: Mutex::new(HashMap::new()),
+            proxy: Mutex::new(None),
         }))
     }
 
@@ -85,17 +139,27 @@ impl HubClient {
         let link: PairingLink = link
             .parse()
             .map_err(|e| HubError::InvalidLink(format!("{e:#}")))?;
-        let mut session = self
-            .open(hub_addr(link.hub, &link.relays), PAIR_ALPN)
-            .await?;
-        let response = session
+        let conn = self
+            .endpoint()
+            .await?
+            .connect(hub_addr(link.hub, &link.relays), PAIR_ALPN)
+            .await
+            .map_err(unreachable)?;
+        let (send, recv) = conn.open_bi().await.map_err(unreachable)?;
+        let mut stream = Stream {
+            conn: conn.clone(),
+            send,
+            recv,
+        };
+        let response = stream
             .request(&PairRequest {
                 secret: link.secret,
                 name: device_name,
                 kind,
             })
             .await?;
-        session.close();
+        stream.finish();
+        conn.close(0u32.into(), b"done");
         match response {
             PairResponse::Paired { hub_name } => Ok(PairedHub {
                 id: link.hub.to_string(),
@@ -112,14 +176,14 @@ impl HubClient {
     }
 
     pub async fn status(&self, hub: PairedHub) -> Result<HubStatus, HubError> {
-        let mut session = self.open(paired_addr(&hub)?, HUB_ALPN).await?;
-        let response = session.request(&HubRequest::Hello).await?;
-        let direct = session
+        let mut stream = self.stream(&hub, HUB_ALPN).await?;
+        let response = stream.request(&HubRequest::Hello).await?;
+        let direct = stream
             .conn
             .paths()
             .iter()
             .any(|path| path.is_selected() && path.is_ip());
-        session.close();
+        stream.finish();
         match response {
             HubResponse::Hello { name, version } => Ok(HubStatus {
                 name,
@@ -131,17 +195,24 @@ impl HubClient {
     }
 
     pub async fn unpair(&self, hub: PairedHub) -> Result<(), HubError> {
-        let mut session = self.open(paired_addr(&hub)?, HUB_ALPN).await?;
-        let _: HubResponse = session.request(&HubRequest::Unpair).await?;
-        session.close();
+        let mut stream = self.stream(&hub, HUB_ALPN).await?;
+        let _: HubResponse = stream.request(&HubRequest::Unpair).await?;
+        stream.finish();
+        //cached sessions would now be refused
+        let mut connections = self.connections.lock().await;
+        connections.retain(|(id, _), conn| {
+            if *id == hub.id {
+                conn.close(0u32.into(), b"unpaired");
+            }
+            *id != hub.id
+        });
         Ok(())
     }
 
     pub async fn devices(&self, hub: PairedHub) -> Result<Vec<HubDevice>, HubError> {
-        let mut session = self.open(paired_addr(&hub)?, ADMIN_ALPN).await?;
-        let AdminResponse::Devices { devices } =
-            session.request(&AdminRequest::ListDevices).await?;
-        session.close();
+        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
+        let AdminResponse::Devices { devices } = stream.request(&AdminRequest::ListDevices).await?;
+        stream.finish();
         Ok(devices
             .into_iter()
             .map(|d| HubDevice {
@@ -154,6 +225,141 @@ impl HubClient {
                 last_seen: d.last_seen,
             })
             .collect())
+    }
+
+    pub async fn push(
+        &self,
+        hub: PairedHub,
+        collection: String,
+        records: Vec<SyncRecord>,
+    ) -> Result<(), HubError> {
+        let records = records
+            .into_iter()
+            .map(|r| Record {
+                id: r.id,
+                updated_at: r.updated_at,
+                deleted: r.deleted,
+                payload: r.payload,
+            })
+            .collect();
+        match self
+            .secrets(
+                &hub,
+                SecretsRequest::Push {
+                    collection,
+                    records,
+                },
+            )
+            .await?
+        {
+            SecretsResponse::Pushed => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn pull(
+        &self,
+        hub: PairedHub,
+        collection: String,
+        since: u64,
+    ) -> Result<PullPage, HubError> {
+        match self
+            .secrets(&hub, SecretsRequest::Pull { collection, since })
+            .await?
+        {
+            SecretsResponse::Records {
+                records,
+                cursor,
+                more,
+            } => Ok(PullPage {
+                records: records
+                    .into_iter()
+                    .map(|r| SyncRecord {
+                        id: r.id,
+                        updated_at: r.updated_at,
+                        deleted: r.deleted,
+                        payload: r.payload,
+                    })
+                    .collect(),
+                cursor,
+                more,
+            }),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn put_grant(&self, hub: PairedHub, grant: McpGrant) -> Result<(), HubError> {
+        let grant = OAuthGrant {
+            server_id: grant.server_id,
+            token_endpoint: grant.token_endpoint,
+            client_id: grant.client_id,
+            refresh_token: grant.refresh_token,
+            access_token: grant.access_token,
+            expires_at: grant.expires_at,
+        };
+        match self
+            .secrets(&hub, SecretsRequest::PutGrant { grant })
+            .await?
+        {
+            SecretsResponse::GrantSaved => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    //none means signing in again
+    pub async fn access_token(
+        &self,
+        hub: PairedHub,
+        server_id: String,
+    ) -> Result<Option<McpAccessToken>, HubError> {
+        match self
+            .secrets(&hub, SecretsRequest::AccessToken { server_id })
+            .await?
+        {
+            SecretsResponse::AccessToken { token } => Ok(token.map(|t| McpAccessToken {
+                access_token: t.access_token,
+                expires_at: t.expires_at,
+            })),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn drop_grant(&self, hub: PairedHub, server_id: String) -> Result<(), HubError> {
+        match self
+            .secrets(&hub, SecretsRequest::DropGrant { server_id })
+            .await?
+        {
+            SecretsResponse::GrantDropped => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn providers(&self, hub: PairedHub) -> Result<Vec<HubProvider>, HubError> {
+        let mut stream = self.stream(&hub, PROVIDERS_ALPN).await?;
+        let response = stream.request(&ProvidersRequest::List).await?;
+        stream.finish();
+        match response {
+            ProvidersResponse::Providers { providers } => Ok(providers
+                .into_iter()
+                .map(|p| HubProvider {
+                    id: p.id,
+                    name: p.name,
+                    kind: p.kind,
+                })
+                .collect()),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    //local entry point for providers
+    pub async fn start_proxy(self: Arc<Self>, hub: PairedHub) -> Result<ProxyInfo, HubError> {
+        let mut proxy = self.proxy.lock().await;
+        if let Some(info) = proxy.as_ref() {
+            return Ok(info.clone());
+        }
+        let info = proxy::start(self.clone(), hub).await?;
+        *proxy = Some(info.clone());
+        Ok(info)
     }
 }
 
@@ -170,46 +376,84 @@ impl HubClient {
             .await
     }
 
-    async fn open(&self, addr: EndpointAddr, alpn: &[u8]) -> Result<Session, HubError> {
-        let conn = self
-            .endpoint()
-            .await?
-            .connect(addr, alpn)
-            .await
-            .map_err(unreachable)?;
-        let (send, recv) = conn.open_bi().await.map_err(unreachable)?;
-        Ok(Session { conn, send, recv })
+    //reconnects once if the connection died
+    async fn stream(&self, hub: &PairedHub, alpn: &'static [u8]) -> Result<Stream, HubError> {
+        let key = (hub.id.clone(), alpn);
+        for _ in 0..2 {
+            let conn = {
+                let mut connections = self.connections.lock().await;
+                match connections.get(&key) {
+                    Some(conn) if conn.close_reason().is_none() => conn.clone(),
+                    _ => {
+                        let conn = self
+                            .endpoint()
+                            .await?
+                            .connect(paired_addr(hub)?, alpn)
+                            .await
+                            .map_err(unreachable)?;
+                        connections.insert(key.clone(), conn.clone());
+                        conn
+                    }
+                }
+            };
+            match conn.open_bi().await {
+                Ok((send, recv)) => return Ok(Stream { conn, send, recv }),
+                Err(_) if refused(&conn) => return Err(HubError::Unauthorized),
+                Err(_) => continue,
+            }
+        }
+        Err(HubError::Unreachable("connection keeps closing".into()))
+    }
+
+    async fn secrets(
+        &self,
+        hub: &PairedHub,
+        request: SecretsRequest,
+    ) -> Result<SecretsResponse, HubError> {
+        let mut stream = self.stream(hub, SECRETS_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            SecretsResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Ok(other),
+        }
     }
 }
 
-//one protocol stream over one connection
-struct Session {
+//one protocol session
+struct Stream {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
 }
 
-impl Session {
+impl Stream {
     async fn request<Req: Serialize, Resp: DeserializeOwned>(
         &mut self,
         req: &Req,
     ) -> Result<Resp, HubError> {
         request(&mut self.recv, &mut self.send, req)
             .await
-            .map_err(|e| match self.conn.close_reason() {
-                Some(ConnectionError::ApplicationClosed(close))
-                    if u64::from(close.error_code) == u64::from(UNAUTHORIZED) =>
-                {
+            .map_err(|e| {
+                if refused(&self.conn) {
                     HubError::Unauthorized
+                } else {
+                    unreachable(e)
                 }
-                _ => unreachable(e),
             })
     }
 
-    fn close(mut self) {
+    fn finish(mut self) {
         let _ = self.send.finish();
-        self.conn.close(0u32.into(), b"done");
     }
+}
+
+fn refused(conn: &Connection) -> bool {
+    matches!(
+        conn.close_reason(),
+        Some(ConnectionError::ApplicationClosed(close))
+            if u64::from(close.error_code) == u64::from(UNAUTHORIZED)
+    )
 }
 
 fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
@@ -224,6 +468,10 @@ fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| HubError::Internal("invalid relay url".into()))?;
     Ok(hub_addr(id, &relays))
+}
+
+fn unexpected(response: SecretsResponse) -> HubError {
+    HubError::Internal(format!("unexpected answer {response:?}"))
 }
 
 fn unreachable(e: impl std::fmt::Display) -> HubError {

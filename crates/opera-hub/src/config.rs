@@ -68,26 +68,42 @@ pub fn load_or_create_key(data_dir: &Path) -> Result<SecretKey> {
             std::fs::create_dir_all(data_dir)
                 .with_context(|| format!("cannot create {}", data_dir.display()))?;
             let key = SecretKey::generate();
-            write_private(&path, &key.to_bytes())?;
+            if !write_private(&path, &key.to_bytes())? {
+                //another process won the race
+                return load_or_create_key(data_dir);
+            }
             Ok(key)
         }
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+//false if it exists never half written
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<bool> {
     use std::io::Write;
+    let mut suffix = [0u8; 8];
+    getrandom::fill(&mut suffix).map_err(|e| anyhow!("no system randomness: {e}"))?;
+    let suffix: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
+    let tmp = path.with_extension(format!("tmp{suffix}"));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options
-        .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
+        .open(&tmp)
+        .with_context(|| format!("cannot create {}", tmp.display()))?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    Ok(())
+    drop(file);
+    //linking fails atomically if the target exists
+    let linked = std::fs::hard_link(&tmp, path);
+    std::fs::remove_file(&tmp)?;
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("cannot create {}", path.display())),
+    }
 }
