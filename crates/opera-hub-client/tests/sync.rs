@@ -114,6 +114,15 @@ async fn data_sync_and_watch() {
     let devices = laptop.devices(hub_ref.clone()).await.unwrap();
     assert!(devices.iter().any(|d| d.id == phone.device_id()));
 
+    //a browser reads the list without admin rights
+    let browser = new_client();
+    let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
+    browser
+        .pair(link, "browser".into(), "web".into())
+        .await
+        .unwrap();
+    assert_eq!(browser.devices(hub_ref.clone()).await.unwrap().len(), 3);
+
     let unknown = laptop.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");
 

@@ -10,15 +10,15 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
-    ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink, SECRETS_ALPN,
-    SYNC_ALPN, UNAUTHORIZED, hub_addr,
+    HUB_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink, SECRETS_ALPN, SYNC_ALPN,
+    UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{self, Config};
 use crate::db::Db;
-use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
+use crate::protocols::{Pair, Peer, Ping, Protocol, Session, admit};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
 use crate::store::Store;
@@ -126,15 +126,6 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Session {
                     store: store.clone(),
                     name,
-                },
-                &store,
-            ),
-        )
-        .accept(
-            ADMIN_ALPN,
-            OverIroh::new(
-                Admin {
-                    store: store.clone(),
                 },
                 &store,
             ),

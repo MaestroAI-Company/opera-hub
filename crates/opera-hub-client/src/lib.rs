@@ -11,14 +11,13 @@ use std::time::Duration;
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use opera_hub_proto::{
-    ADMIN_ALPN, ForwardHead, AdminRequest, AdminResponse, HUB_ALPN, HubRequest,
-    HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse,
-    PairingLink, ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
-    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame,
-    request, write_frame,
+    ForwardHead, HUB_ALPN, HubRequest, HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN,
+    PairRejection, PairRequest, PairResponse, PairingLink, ProvidersRequest, ProvidersResponse,
+    Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse,
+    SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame, request, write_frame,
 };
-use serde::{Deserialize, Serialize, Serializer};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::{Mutex, OnceCell};
 
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
@@ -30,7 +29,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MIN_UPLOAD_BYTES_PER_SEC: usize = 32 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Error), uniffi(flat_error))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Error),
+    uniffi(flat_error)
+)]
 pub enum HubError {
     #[error("invalid pairing link: {0}")]
     InvalidLink(String),
@@ -69,7 +72,10 @@ impl Serialize for HubError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedHub {
     pub id: String,
@@ -78,7 +84,10 @@ pub struct PairedHub {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct HubStatus {
     pub name: String,
@@ -88,7 +97,10 @@ pub struct HubStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct HubDevice {
     pub id: String,
@@ -101,7 +113,10 @@ pub struct HubDevice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRecord {
     pub id: String,
@@ -111,7 +126,10 @@ pub struct SyncRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct PullPage {
     pub records: Vec<SyncRecord>,
@@ -120,7 +138,10 @@ pub struct PullPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct McpGrant {
     pub server_id: String,
@@ -132,7 +153,10 @@ pub struct McpGrant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAccessToken {
     pub access_token: String,
@@ -140,7 +164,10 @@ pub struct McpAccessToken {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct HubProvider {
     pub id: String,
@@ -149,14 +176,20 @@ pub struct HubProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
 }
 
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Object))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Object)
+)]
 pub struct HubClient {
     secret_key: SecretKey,
     //binding needs the tokio runtime
@@ -167,10 +200,16 @@ pub struct HubClient {
     proxy: Mutex<Option<ProxyInfo>>,
 }
 
-#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), uniffi::export(async_runtime = "tokio"))]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    uniffi::export(async_runtime = "tokio")
+)]
 impl HubClient {
     //the app creates and stores it
-    #[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), uniffi::constructor)]
+    #[cfg_attr(
+        not(all(target_family = "wasm", target_os = "unknown")),
+        uniffi::constructor
+    )]
     pub fn new(secret_key: Vec<u8>) -> Result<Arc<Self>, HubError> {
         let bytes: [u8; 32] = secret_key
             .try_into()
@@ -266,9 +305,14 @@ impl HubClient {
     }
 
     pub async fn devices(&self, hub: PairedHub) -> Result<Vec<HubDevice>, HubError> {
-        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
-        let AdminResponse::Devices { devices } = stream.request(&AdminRequest::ListDevices).await?;
+        let mut stream = self.stream(&hub, HUB_ALPN).await?;
+        let response = stream.request(&HubRequest::Devices).await?;
         stream.finish();
+        let HubResponse::Devices { devices } = response else {
+            return Err(HubError::Internal(format!(
+                "unexpected answer {response:?}"
+            )));
+        };
         Ok(devices
             .into_iter()
             .map(|d| HubDevice {

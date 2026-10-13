@@ -88,15 +88,24 @@ impl WebHubClient {
         Ok(promise(async move { inner.devices(hub).await }))
     }
 
-    pub fn push(&self, hub: JsValue, collection: String, records: JsValue) -> Result<Promise, JsValue> {
+    pub fn push(
+        &self,
+        hub: JsValue,
+        collection: String,
+        records: JsValue,
+    ) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
         let records = from_js::<Vec<SyncRecord>>(records)?;
-        Ok(promise(async move { inner.push(hub, collection, records).await }))
+        Ok(promise(async move {
+            inner.push(hub, collection, records).await
+        }))
     }
 
     pub fn pull(&self, hub: JsValue, collection: String, since: f64) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        Ok(promise(async move { inner.pull(hub, collection, since as u64).await }))
+        Ok(promise(async move {
+            inner.pull(hub, collection, since as u64).await
+        }))
     }
 
     pub fn watch(&self, hub: JsValue, since: f64) -> Result<Promise, JsValue> {
@@ -114,13 +123,17 @@ impl WebHubClient {
     #[wasm_bindgen(js_name = accessToken)]
     pub fn access_token(&self, hub: JsValue, server_id: String) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        Ok(promise(async move { inner.access_token(hub, server_id).await }))
+        Ok(promise(
+            async move { inner.access_token(hub, server_id).await },
+        ))
     }
 
     #[wasm_bindgen(js_name = dropGrant)]
     pub fn drop_grant(&self, hub: JsValue, server_id: String) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        Ok(promise(async move { inner.drop_grant(hub, server_id).await }))
+        Ok(promise(
+            async move { inner.drop_grant(hub, server_id).await },
+        ))
     }
 
     pub fn providers(&self, hub: JsValue) -> Result<Promise, JsValue> {

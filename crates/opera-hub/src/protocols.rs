@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use opera_hub_proto::{
-    AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, SCOPE_ADMIN,
-    read_frame, write_frame,
+    HubRequest, HubResponse, PairRequest, PairResponse, read_frame, write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -152,6 +151,9 @@ impl Protocol for Session {
                     name: self.name.to_string(),
                     version: env!("CARGO_PKG_VERSION").into(),
                 },
+                HubRequest::Devices => HubResponse::Devices {
+                    devices: self.store.devices()?,
+                },
                 HubRequest::Unpair => {
                     self.store.remove_device(&peer.id)?;
                     info!("{} unpaired itself", peer.short());
@@ -165,34 +167,9 @@ impl Protocol for Session {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Admin {
-    pub store: Arc<Store>,
-}
-
-impl Protocol for Admin {
-    const ACCESS: Access = Access::Scope(SCOPE_ADMIN);
-
-    async fn serve<R, W>(&self, _peer: Peer, mut reader: R, mut writer: W) -> Result<()>
-    where
-        R: AsyncRead + Unpin + Send,
-        W: AsyncWrite + Unpin + Send,
-    {
-        while let Some(request) = read_frame(&mut reader).await? {
-            let response = match request {
-                AdminRequest::ListDevices => AdminResponse::Devices {
-                    devices: self.store.devices()?,
-                },
-            };
-            write_frame(&mut writer, &response).await?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use opera_hub_proto::{KIND_PHONE, SCOPE_SYNC};
+    use opera_hub_proto::{KIND_PHONE, SCOPE_ADMIN, SCOPE_SYNC};
 
     use super::*;
 
