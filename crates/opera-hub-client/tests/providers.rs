@@ -80,7 +80,10 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str) -> Pai
     let link = opera_hub::hub::pairing_link(data_dir).unwrap().to_string();
     //fresh hubs publish their address slowly
     for _ in 0..10 {
-        match client.pair(link.clone(), name.into(), "phone".into()).await {
+        match client
+            .pair(link.clone(), name.into(), "phone".into(), None)
+            .await
+        {
             Err(HubError::Unreachable(_)) => {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await
             }

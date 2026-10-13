@@ -20,7 +20,10 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str) -> Pai
     let link = opera_hub::hub::pairing_link(data_dir).unwrap().to_string();
     //fresh hubs publish their address slowly
     for _ in 0..10 {
-        match client.pair(link.clone(), name.into(), "phone".into()).await {
+        match client
+            .pair(link.clone(), name.into(), "phone".into(), None)
+            .await
+        {
             Err(HubError::Unreachable(_)) => tokio::time::sleep(Duration::from_secs(2)).await,
             result => return result.unwrap(),
         }
@@ -118,7 +121,7 @@ async fn data_sync_and_watch() {
     let browser = new_client();
     let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
     browser
-        .pair(link, "browser".into(), "web".into())
+        .pair(link, "browser".into(), "web".into(), None)
         .await
         .unwrap();
     assert_eq!(browser.devices(hub_ref.clone()).await.unwrap().len(), 3);
@@ -154,7 +157,7 @@ async fn pairing_by_code() {
     let stranger = new_client();
     assert!(
         stranger
-            .pair_with_code("0000-0000".into(), "stranger".into(), "web".into())
+            .pair_with_code("0000-0000".into(), "stranger".into(), "web".into(), None)
             .await
             .is_err()
     );
@@ -163,17 +166,41 @@ async fn pairing_by_code() {
     let browser = new_client();
     let typed = invite.code.to_lowercase().replace('-', " ");
     let paired = browser
-        .pair_with_code(typed, "browser".into(), "web".into())
+        .pair_with_code(typed, "browser".into(), "web".into(), None)
         .await
         .unwrap();
     assert_eq!(paired.id, hub_ref.id);
     let devices = browser.devices(paired).await.unwrap();
     assert!(devices.iter().any(|d| d.id == browser.device_id()));
 
+    //a reinstall pairs again with a new key from the same machine
+    let old_install = new_client();
+    let new_install = new_client();
+    for install in [&old_install, &new_install] {
+        let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
+        install
+            .pair(
+                link,
+                "tablet".into(),
+                "phone".into(),
+                Some("same-os-id".into()),
+            )
+            .await
+            .unwrap();
+    }
+    let ids: Vec<String> = phone
+        .devices(hub_ref.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert!(ids.contains(&new_install.device_id()) && !ids.contains(&old_install.device_id()));
+
     //the code works once
     let late = new_client();
     assert!(
-        late.pair_with_code(invite.code, "late".into(), "web".into())
+        late.pair_with_code(invite.code, "late".into(), "web".into(), None)
             .await
             .is_err()
     );
@@ -219,7 +246,7 @@ async fn hub_settings_and_lan() {
     let browser = new_client();
     let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
     browser
-        .pair(link, "browser".into(), "web".into())
+        .pair(link, "browser".into(), "web".into(), None)
         .await
         .unwrap();
     assert!(matches!(

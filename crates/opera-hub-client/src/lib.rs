@@ -18,8 +18,8 @@ use opera_hub_proto::{
     ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
     OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink,
     ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
-    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame,
-    request, write_frame,
+    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr,
+    machine_tag, read_frame, request, write_frame,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -280,11 +280,13 @@ impl HubClient {
         self.secret_key.public().to_string()
     }
 
+    //machine is a stable os id, hashed before it leaves
     pub async fn pair(
         &self,
         link: String,
         device_name: String,
         kind: String,
+        machine: Option<String>,
     ) -> Result<PairedHub, HubError> {
         let link: PairingLink = link
             .parse()
@@ -303,6 +305,7 @@ impl HubClient {
                 secret: link.secret,
                 name: device_name,
                 kind,
+                machine: machine.map(|raw| machine_tag(&link.hub, &raw)),
             })
             .await?;
         stream.finish();
@@ -328,6 +331,7 @@ impl HubClient {
         code: String,
         device_name: String,
         kind: String,
+        machine: Option<String>,
     ) -> Result<PairedHub, HubError> {
         let keys = derive_code(code).await?;
         //a wrong code has no address to find
@@ -352,7 +356,7 @@ impl HubClient {
         stream.finish();
         conn.close(0u32.into(), b"done");
         match response {
-            InviteResponse::Link { link } => self.pair(link, device_name, kind).await,
+            InviteResponse::Link { link } => self.pair(link, device_name, kind, machine).await,
             InviteResponse::Rejected => Err(HubError::PairingRejected),
         }
     }

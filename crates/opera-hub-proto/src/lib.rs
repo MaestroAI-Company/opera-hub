@@ -26,6 +26,16 @@ pub const SECRET_COLLECTIONS: [&str; 2] = [COLLECTION_PROVIDERS, COLLECTION_ACCO
 //everyday data under the sync scope
 pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 
+//the raw id never leaves the device, and differs per hub
+pub fn machine_tag(hub: &EndpointId, raw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"opera-hub-machine-1");
+    hash.update(hub.as_bytes());
+    hash.update(raw.as_bytes());
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 //device names shown in every list
 pub const MAX_DEVICE_NAME: usize = 64;
 
@@ -60,6 +70,9 @@ pub struct PairRequest {
     pub secret: String,
     pub name: String,
     pub kind: String,
+    //same machine pairing again replaces its old entry
+    #[serde(default)]
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -160,6 +173,9 @@ pub struct DeviceInfo {
     //none when paired from the hub itself
     pub paired_by: Option<String>,
     pub last_seen: Option<u64>,
+    //hashed per hub, survives reinstalls
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 //last writer wins on updated_at then device

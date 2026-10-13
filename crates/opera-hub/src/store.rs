@@ -128,7 +128,10 @@ impl Store {
         //one time secret
         std::fs::remove_file(&path)?;
         let mut devices = self.devices()?;
-        devices.retain(|known| known.id != device.id);
+        //a reinstalled app comes back with a new key
+        let same_machine =
+            |known: &Device| device.machine.is_some() && known.machine == device.machine;
+        devices.retain(|known| known.id != device.id && !same_machine(known));
         devices.push(device);
         write_json(&self.dir.join(DEVICES_FILE), &devices)?;
         Ok(Ok(()))
@@ -208,6 +211,7 @@ mod tests {
             paired_at: 0,
             paired_by: None,
             last_seen: None,
+            machine: None,
         }
     }
 

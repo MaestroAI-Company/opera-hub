@@ -124,6 +124,10 @@ impl Protocol for Pair {
             //qr codes come from the hub owner
             paired_by: None,
             last_seen: Some(unix_now()),
+            //only a hash fits
+            machine: request
+                .machine
+                .filter(|tag| tag.len() == 64 && tag.bytes().all(|b| b.is_ascii_hexdigit())),
         };
         let label = format!("{} ({})", device.name, peer.short());
         let response = match self.store.finish_pairing(&request.secret, device)? {
@@ -330,6 +334,7 @@ mod tests {
             paired_at: 0,
             paired_by: None,
             last_seen: None,
+            machine: None,
         };
         store.finish_pairing(&secret, device).unwrap().unwrap();
         store

@@ -32,7 +32,7 @@ async fn pair_status_unpair() {
     let mut attempts = 0;
     let paired = loop {
         match client
-            .pair(link.clone(), "test phone".into(), "phone".into())
+            .pair(link.clone(), "test phone".into(), "phone".into(), None)
             .await
         {
             Err(HubError::Unreachable(_)) if attempts < 10 => attempts += 1,
@@ -49,7 +49,9 @@ async fn pair_status_unpair() {
 
     //the secret is one time
     let other = HubClient::new(random_bytes::<32>().to_vec()).unwrap();
-    let again = other.pair(link, "intruder".into(), "phone".into()).await;
+    let again = other
+        .pair(link, "intruder".into(), "phone".into(), None)
+        .await;
     assert!(matches!(again, Err(HubError::PairingRejected)), "{again:?}");
     assert!(matches!(
         other.status(paired.clone()).await,
