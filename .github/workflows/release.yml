@@ -107,6 +107,11 @@ jobs:
           if [ "${{ runner.os }}" = "macOS" ]; then
             cp target/release/opera-hubw dist/opera-hubw-macos-aarch64
           fi
+          # the desktop app ships it as a sidecar
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            name="${{ matrix.name }}"
+            cp target/release/opera-hubw "dist/${name/opera-hub/opera-hubw}"
+          fi
 
       # the tauri bundler, it fetches nsis itself
       - name: Install cargo-packager

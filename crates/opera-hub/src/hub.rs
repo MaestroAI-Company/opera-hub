@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
@@ -50,26 +50,7 @@ pub async fn run_with_targets(
     shutdown: impl Future<Output = ()>,
     targets: Vec<Target>,
 ) -> Result<()> {
-    let running = start(data_dir, targets, true).await?;
-    shutdown.await;
-    running.stop().await
-}
-
-//tells an embedding app once it listens
-pub async fn run_notify(
-    data_dir: &Path,
-    started: tokio::sync::oneshot::Sender<Result<()>>,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
-    //the app updates its own hub
-    let running = match start(data_dir, default_targets(), false).await {
-        Ok(running) => running,
-        Err(e) => {
-            let _ = started.send(Err(anyhow!("{e:#}")));
-            return Err(e);
-        }
-    };
-    let _ = started.send(Ok(()));
+    let running = start(data_dir, targets).await?;
     shutdown.await;
     running.stop().await
 }
@@ -77,7 +58,7 @@ pub async fn run_notify(
 struct Running {
     router: Router,
     lan: tokio::task::JoinHandle<()>,
-    updates: Option<tokio::task::JoinHandle<()>>,
+    updates: tokio::task::JoinHandle<()>,
     _lock: std::fs::File,
 }
 
@@ -85,16 +66,13 @@ impl Running {
     async fn stop(self) -> Result<()> {
         info!("hub stopping");
         self.lan.abort();
-        if let Some(updates) = self.updates {
-            updates.abort();
-        }
+        self.updates.abort();
         self.router.shutdown().await?;
         Ok(())
     }
 }
 
-//standalone hubs check for and install releases
-async fn start(data_dir: &Path, targets: Vec<Target>, standalone: bool) -> Result<Running> {
+async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     //held until the hub stops
     let lock = lock(data_dir)?;
     let config = Config::load(data_dir)?;
@@ -125,13 +103,8 @@ async fn start(data_dir: &Path, targets: Vec<Target>, standalone: bool) -> Resul
     let store = Arc::new(Store::new(data_dir));
     let db = Arc::new(Db::open(data_dir)?);
     let http = http_client()?;
-    let (latest, updates) = if standalone {
-        let (sender, latest) = tokio::sync::watch::channel(None);
-        let task = tokio::spawn(update::watch_releases(http.clone(), sender));
-        (Some(latest), Some(task))
-    } else {
-        (None, None)
-    };
+    let (sender, latest) = tokio::sync::watch::channel(None);
+    let updates = tokio::spawn(update::watch_releases(http.clone(), sender));
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))

@@ -136,8 +136,7 @@ impl Protocol for Pair {
 pub struct Session {
     pub store: Arc<Store>,
     pub name: Arc<str>,
-    //none when the hub lives inside the app
-    pub latest: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    pub latest: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 impl Protocol for Session {
@@ -153,7 +152,7 @@ impl Protocol for Session {
                 HubRequest::Hello => HubResponse::Hello {
                     name: self.name.to_string(),
                     version: env!("CARGO_PKG_VERSION").into(),
-                    update: self.latest.as_ref().and_then(|l| l.borrow().clone()),
+                    update: self.latest.borrow().clone(),
                 },
                 HubRequest::Devices => HubResponse::Devices {
                     devices: self.store.devices()?,
@@ -176,8 +175,7 @@ pub struct Admin {
     pub data_dir: std::path::PathBuf,
     pub settings: Arc<crate::settings::Settings>,
     pub http: reqwest::Client,
-    //none when the hub lives inside the app
-    pub latest: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    pub latest: tokio::sync::watch::Receiver<Option<String>>,
 }
 
 impl std::fmt::Debug for Admin {
@@ -240,11 +238,8 @@ impl Protocol for Admin {
 
 impl Admin {
     async fn update(&self) -> Result<String> {
-        let Some(latest) = &self.latest else {
-            anyhow::bail!("this hub updates with the Opera app");
-        };
         //the guard must not live across an await
-        let known = latest.borrow().clone();
+        let known = self.latest.borrow().clone();
         let version = match known {
             Some(version) => version,
             None => crate::update::newer_release(&self.http)

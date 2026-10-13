@@ -1,10 +1,9 @@
-mod service;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use iroh_tickets::endpoint::EndpointTicket;
+use opera_hub::service::{self, Launch, Status};
 use opera_hub::store::{self, Store};
 use opera_hub::{config, hub, invite};
 
@@ -119,11 +118,32 @@ fn main() -> Result<()> {
             runtime()?.block_on(hub::ping(&data_dir, ticket, count))
         }
         Command::Service { action } => match action {
-            ServiceAction::Install => service::install(&data_dir),
-            ServiceAction::Uninstall => service::uninstall(),
-            ServiceAction::Start => service::start(&data_dir),
+            ServiceAction::Install => {
+                service::install(&launch(&data_dir)?)?;
+                println!("installed, the hub starts with your session and runs now");
+                if cfg!(target_os = "linux") {
+                    println!(
+                        "to start it at boot without a login session, run: loginctl enable-linger $USER"
+                    );
+                }
+                Ok(())
+            }
+            ServiceAction::Uninstall => {
+                service::uninstall()?;
+                println!("uninstalled");
+                Ok(())
+            }
+            ServiceAction::Start => service::start(&launch(&data_dir)?),
             ServiceAction::Stop => service::stop(),
-            ServiceAction::Status => service::status(),
+            ServiceAction::Status => {
+                let status = match service::status()? {
+                    Status::NotInstalled => "not installed",
+                    Status::Running => "running",
+                    Status::Stopped => "stopped",
+                };
+                println!("{status}");
+                Ok(())
+            }
         },
     }
 }
@@ -163,6 +183,11 @@ fn devices(data_dir: &Path, action: DevicesAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+//the binaries next to this one
+fn launch(data_dir: &Path) -> Result<Launch> {
+    Launch::next_to(&std::env::current_exe()?, data_dir)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
