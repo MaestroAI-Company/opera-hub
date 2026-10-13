@@ -249,6 +249,31 @@ fn data_key(data_dir: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+//a moved data dir keeps its key
+pub(crate) fn copy_keychain_key(old: &Path, new: &Path) -> Result<()> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let entry = |dir: &Path| keyring::Entry::new("opera-hub", &dir.display().to_string());
+        match entry(old)?.get_secret() {
+            Ok(secret) => entry(new)?.set_secret(&secret)?,
+            Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = (old, new);
+    Ok(())
+}
+
+pub(crate) fn forget_keychain_key(old: &Path) {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Ok(entry) = keyring::Entry::new("opera-hub", &old.display().to_string()) {
+        let _ = entry.delete_credential();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = old;
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 fn keychain_key(data_dir: &Path) -> Result<[u8; 32]> {
     let entry = keyring::Entry::new("opera-hub", &data_dir.display().to_string())?;

@@ -29,6 +29,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 webpki-roots = "1"
 
+[target.'cfg(windows)'.build-dependencies]
+tauri-winres = "0.3"
+
 [target."cfg(not(windows))".dependencies]
 service-manager = "0.11"
 
@@ -68,9 +71,11 @@ icons = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/128
 installer-mode = "currentUser"
 languages = ["English", "French"]
 # the uninstaller offers to delete pairings and data, off by default
-appdata-paths = ["$LOCALAPPDATA/Maestro AI/Opera Hub"]
-# login start, removed again by the uninstaller
+appdata-paths = ["$LOCALAPPDATA/MaestroAI-Company/Opera Hub/data"]
+# company folder, login start removed again by the uninstaller
 preinstall-section = '''
+InstallDir "$LOCALAPPDATA\MaestroAI-Company\Opera Hub"
+
 Section LoginStart
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OperaHub" '"$INSTDIR\opera-hubw.exe"'
 SectionEnd

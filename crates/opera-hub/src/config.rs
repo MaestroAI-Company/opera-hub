@@ -47,11 +47,49 @@ impl Config {
     }
 }
 
-pub fn default_data_dir() -> Result<PathBuf> {
+//every maestro ai app shares one company folder
+const COMPANY: &str = "MaestroAI-Company";
+const OLD_COMPANY: &str = "Maestro AI";
+
+fn company_data_dir(company: &str) -> Result<PathBuf> {
     //local so the key never roams
-    ProjectDirs::from("company", "Maestro AI", "Opera Hub")
+    ProjectDirs::from("company", company, "Opera Hub")
         .map(|dirs| dirs.data_local_dir().to_path_buf())
         .context("no home directory to store hub data")
+}
+
+pub fn default_data_dir() -> Result<PathBuf> {
+    let dir = company_data_dir(COMPANY)?;
+    let old = company_data_dir(OLD_COMPANY)?;
+    if old != dir && old.exists() && !dir.exists() {
+        match move_data_dir(&old, &dir) {
+            Ok(()) => tracing::info!("hub data moved to {}", dir.display()),
+            //a hub still running there keeps its files
+            Err(e) => {
+                tracing::warn!("hub data stays in {}: {e:#}", old.display());
+                return Ok(old);
+            }
+        }
+    }
+    Ok(dir)
+}
+
+//the keychain entry follows so the database stays readable
+fn move_data_dir(old: &Path, new: &Path) -> Result<()> {
+    crate::db::copy_keychain_key(old, new)?;
+    if let Some(parent) = new.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(old, new)
+        .with_context(|| format!("cannot move {} to {}", old.display(), new.display()))?;
+    crate::db::forget_keychain_key(old);
+    //the old company folder held only the hub
+    for empty in old.ancestors().skip(1).take(2) {
+        if std::fs::remove_dir(empty).is_err() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 //losing it unpairs every device
