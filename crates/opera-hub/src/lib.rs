@@ -3,6 +3,7 @@ pub mod db;
 pub mod hub;
 pub mod invite;
 pub mod lan;
+pub mod llama;
 pub mod protocols;
 pub mod providers;
 pub mod secrets;

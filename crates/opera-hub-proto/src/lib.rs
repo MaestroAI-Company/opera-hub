@@ -17,6 +17,7 @@ pub const ADMIN_ALPN: &[u8] = b"opera/admin/1";
 pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
 pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
 pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
+pub const MODELS_ALPN: &[u8] = b"opera/models/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
@@ -281,6 +282,72 @@ pub enum SyncResponse {
     Error {
         message: String,
     },
+}
+
+//llama.cpp models on the hub, admins manage them
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelsRequest {
+    Catalog,
+    Search { query: String },
+    Files { repo: String },
+    Download { repo: String, file: String },
+    Cancel { file: String },
+    Delete { file: String },
+    Status,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelsResponse {
+    Catalog { models: Vec<CatalogModel> },
+    Repos { repos: Vec<ModelRepo> },
+    Files { files: Vec<ModelFile> },
+    Status { status: LlamaStatus },
+    Error { message: String },
+}
+
+//recommended models, picked by hand
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogModel {
+    pub repo: String,
+    pub file: String,
+    pub name: String,
+    pub description: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRepo {
+    pub repo: String,
+    pub downloads: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFile {
+    pub file: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDownload {
+    pub repo: String,
+    pub file: String,
+    pub received: u64,
+    pub total: u64,
+    //set when it stopped early
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlamaStatus {
+    //idle, installing, running or failed
+    pub state: String,
+    //cpu, vulkan, cuda or metal
+    pub backend: Option<String>,
+    pub message: Option<String>,
+    pub installed: Vec<ModelFile>,
+    pub downloads: Vec<ModelDownload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

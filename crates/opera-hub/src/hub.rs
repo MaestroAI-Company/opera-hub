@@ -10,8 +10,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
-    ADMIN_ALPN, HUB_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink, SECRETS_ALPN,
-    SYNC_ALPN, UNAUTHORIZED, hub_addr,
+    ADMIN_ALPN, HUB_ALPN, MODELS_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink,
+    SECRETS_ALPN, SYNC_ALPN, UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::lan;
+use crate::llama::{Llama, Models};
 use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
@@ -57,6 +58,7 @@ pub async fn run_with_targets(
 
 struct Running {
     router: Router,
+    llama: Arc<Llama>,
     lan: tokio::task::JoinHandle<()>,
     updates: tokio::task::JoinHandle<()>,
     _lock: std::fs::File,
@@ -65,6 +67,7 @@ struct Running {
 impl Running {
     async fn stop(self) -> Result<()> {
         info!("hub stopping");
+        self.llama.stop_server();
         self.lan.abort();
         self.updates.abort();
         self.router.shutdown().await?;
@@ -105,6 +108,9 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let http = http_client()?;
     let (sender, latest) = tokio::sync::watch::channel(None);
     let updates = tokio::spawn(update::watch_releases(http.clone(), sender));
+    let llama = Llama::new(data_dir, http.clone());
+    //models already on disk start serving
+    llama.refresh();
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))
@@ -143,6 +149,15 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             ),
         )
         .accept(
+            MODELS_ALPN,
+            OverIroh::new(
+                Models {
+                    llama: llama.clone(),
+                },
+                &store,
+            ),
+        )
+        .accept(
             SYNC_ALPN,
             OverIroh::new(DataSync { db: db.clone() }, &store),
         )
@@ -164,6 +179,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                     http,
                     targets: Arc::new(targets),
                     settings,
+                    llama: llama.clone(),
                 },
                 &store,
             ),
@@ -171,6 +187,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
         .spawn();
     Ok(Running {
         router,
+        llama,
         lan,
         updates,
         _lock: lock,

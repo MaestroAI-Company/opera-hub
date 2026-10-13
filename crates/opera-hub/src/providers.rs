@@ -56,6 +56,8 @@ pub struct Providers {
     pub http: reqwest::Client,
     pub targets: Arc<Vec<Target>>,
     pub settings: Arc<crate::settings::Settings>,
+    //models the hub runs itself
+    pub llama: Arc<crate::llama::Llama>,
 }
 
 impl std::fmt::Debug for Providers {
@@ -102,6 +104,13 @@ impl Providers {
         if !self.settings.get().share_providers {
             return found;
         }
+        if self.llama.base_url().is_some() {
+            found.push(ProviderInfo {
+                id: crate::llama::PROVIDER_ID.into(),
+                name: "llama.cpp".into(),
+                kind: "openai".into(),
+            });
+        }
         for target in self.targets.iter() {
             let probe = self
                 .http
@@ -126,11 +135,20 @@ impl Providers {
         if !self.settings.get().share_providers {
             bail!("this hub does not share its providers");
         }
-        let target = self
-            .targets
-            .iter()
-            .find(|t| t.id == head.provider)
-            .ok_or_else(|| anyhow!("unknown provider {}", head.provider))?;
+        let llama = self
+            .llama
+            .base_url()
+            .filter(|_| head.provider == crate::llama::PROVIDER_ID);
+        let base = match llama {
+            Some(base) => base,
+            None => self
+                .targets
+                .iter()
+                .find(|t| t.id == head.provider)
+                .ok_or_else(|| anyhow!("unknown provider {}", head.provider))?
+                .base
+                .clone(),
+        };
         //a leading slash keeps the host fixed
         if !head.path.starts_with('/') {
             bail!("invalid path");
@@ -144,7 +162,7 @@ impl Providers {
         let method = reqwest::Method::from_bytes(head.method.as_bytes())?;
         let mut request = self
             .http
-            .request(method, format!("{}{}", target.base, head.path))
+            .request(method, format!("{base}{}", head.path))
             .body(body);
         for (name, value) in &head.headers {
             if FORWARDED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {

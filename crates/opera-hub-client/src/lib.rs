@@ -16,10 +16,11 @@ use opera_hub_proto::HubSettings as ProtoSettings;
 use opera_hub_proto::invite::{self, INVITE_ALPN, InviteRequest, InviteResponse};
 use opera_hub_proto::{
     ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
-    OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink,
-    ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
-    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr,
-    machine_tag, read_frame, request, write_frame,
+    MODELS_ALPN, ModelsRequest, ModelsResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN,
+    PairRejection, PairRequest, PairResponse, PairingLink, ProvidersRequest, ProvidersResponse,
+    Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse,
+    SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, machine_tag, read_frame, request,
+    write_frame,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -126,6 +127,70 @@ pub struct NearbyHub {
     pub id: String,
     pub name: String,
     pub addrs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogModel {
+    pub repo: String,
+    pub file: String,
+    pub name: String,
+    pub description: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRepo {
+    pub repo: String,
+    pub downloads: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFile {
+    pub file: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDownload {
+    pub repo: String,
+    pub file: String,
+    pub received: u64,
+    pub total: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct LlamaStatus {
+    pub state: String,
+    pub backend: Option<String>,
+    pub message: Option<String>,
+    pub installed: Vec<ModelFile>,
+    pub downloads: Vec<ModelDownload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +463,83 @@ impl HubClient {
     pub async fn remove_device(&self, hub: PairedHub, id: String) -> Result<(), HubError> {
         self.admin_devices(&hub, AdminRequest::RemoveDevice { id })
             .await
+    }
+
+    pub async fn models_catalog(&self, hub: PairedHub) -> Result<Vec<CatalogModel>, HubError> {
+        match self.models(&hub, ModelsRequest::Catalog).await? {
+            ModelsResponse::Catalog { models } => Ok(models
+                .into_iter()
+                .map(|m| CatalogModel {
+                    repo: m.repo,
+                    file: m.file,
+                    name: m.name,
+                    description: m.description,
+                    size: m.size,
+                })
+                .collect()),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    //gguf repositories on hugging face
+    pub async fn models_search(
+        &self,
+        hub: PairedHub,
+        query: String,
+    ) -> Result<Vec<ModelRepo>, HubError> {
+        match self.models(&hub, ModelsRequest::Search { query }).await? {
+            ModelsResponse::Repos { repos } => Ok(repos
+                .into_iter()
+                .map(|r| ModelRepo {
+                    repo: r.repo,
+                    downloads: r.downloads,
+                })
+                .collect()),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    pub async fn models_files(
+        &self,
+        hub: PairedHub,
+        repo: String,
+    ) -> Result<Vec<ModelFile>, HubError> {
+        match self.models(&hub, ModelsRequest::Files { repo }).await? {
+            ModelsResponse::Files { files } => Ok(files.into_iter().map(model_file).collect()),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    pub async fn models_download(
+        &self,
+        hub: PairedHub,
+        repo: String,
+        file: String,
+    ) -> Result<LlamaStatus, HubError> {
+        self.models_status_of(&hub, ModelsRequest::Download { repo, file })
+            .await
+    }
+
+    pub async fn models_cancel(
+        &self,
+        hub: PairedHub,
+        file: String,
+    ) -> Result<LlamaStatus, HubError> {
+        self.models_status_of(&hub, ModelsRequest::Cancel { file })
+            .await
+    }
+
+    pub async fn models_delete(
+        &self,
+        hub: PairedHub,
+        file: String,
+    ) -> Result<LlamaStatus, HubError> {
+        self.models_status_of(&hub, ModelsRequest::Delete { file })
+            .await
+    }
+
+    pub async fn models_status(&self, hub: PairedHub) -> Result<LlamaStatus, HubError> {
+        self.models_status_of(&hub, ModelsRequest::Status).await
     }
 
     //the hub installs the release and restarts
@@ -826,6 +968,47 @@ impl HubClient {
         }
     }
 
+    async fn models(
+        &self,
+        hub: &PairedHub,
+        request: ModelsRequest,
+    ) -> Result<ModelsResponse, HubError> {
+        let mut stream = self.stream(hub, MODELS_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            ModelsResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Ok(other),
+        }
+    }
+
+    async fn models_status_of(
+        &self,
+        hub: &PairedHub,
+        request: ModelsRequest,
+    ) -> Result<LlamaStatus, HubError> {
+        match self.models(hub, request).await? {
+            ModelsResponse::Status { status } => Ok(LlamaStatus {
+                state: status.state,
+                backend: status.backend,
+                message: status.message,
+                installed: status.installed.into_iter().map(model_file).collect(),
+                downloads: status
+                    .downloads
+                    .into_iter()
+                    .map(|d| ModelDownload {
+                        repo: d.repo,
+                        file: d.file,
+                        received: d.received,
+                        total: d.total,
+                        error: d.error,
+                    })
+                    .collect(),
+            }),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     async fn data(&self, hub: &PairedHub, request: SyncRequest) -> Result<SyncResponse, HubError> {
         let mut stream = self.stream(hub, SYNC_ALPN).await?;
         let response = stream.request(&request).await?;
@@ -916,6 +1099,13 @@ fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
 
 fn unexpected(response: SecretsResponse) -> HubError {
     HubError::Internal(format!("unexpected answer {response:?}"))
+}
+
+fn model_file(file: opera_hub_proto::ModelFile) -> ModelFile {
+    ModelFile {
+        file: file.file,
+        size: file.size,
+    }
 }
 
 //argon2 is slow on purpose
