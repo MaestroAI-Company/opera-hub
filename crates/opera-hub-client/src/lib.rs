@@ -1,4 +1,7 @@
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod proxy;
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+mod web;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -8,15 +11,17 @@ use std::time::Duration;
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use opera_hub_proto::{
-    ADMIN_ALPN, AdminRequest, AdminResponse, HUB_ALPN, HubRequest,
+    ADMIN_ALPN, ForwardHead, AdminRequest, AdminResponse, HUB_ALPN, HubRequest,
     HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse,
     PairingLink, ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
-    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, request,
+    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame,
+    request, write_frame,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, OnceCell};
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 uniffi::setup_scaffolding!();
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -24,8 +29,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 //slowest relay upload still allowed to finish
 const MIN_UPLOAD_BYTES_PER_SEC: usize = 32 * 1024;
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Error), uniffi(flat_error))]
 pub enum HubError {
     #[error("invalid pairing link: {0}")]
     InvalidLink(String),
@@ -63,7 +68,8 @@ impl Serialize for HubError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct PairedHub {
     pub id: String,
@@ -71,7 +77,8 @@ pub struct PairedHub {
     pub relays: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct HubStatus {
     pub name: String,
@@ -80,7 +87,8 @@ pub struct HubStatus {
     pub direct: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct HubDevice {
     pub id: String,
@@ -92,7 +100,8 @@ pub struct HubDevice {
     pub last_seen: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRecord {
     pub id: String,
@@ -101,7 +110,8 @@ pub struct SyncRecord {
     pub payload: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct PullPage {
     pub records: Vec<SyncRecord>,
@@ -109,7 +119,8 @@ pub struct PullPage {
     pub more: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct McpGrant {
     pub server_id: String,
@@ -120,14 +131,16 @@ pub struct McpGrant {
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct McpAccessToken {
     pub access_token: String,
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct HubProvider {
     pub id: String,
@@ -135,27 +148,29 @@ pub struct HubProvider {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Record))]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
 }
 
-#[derive(uniffi::Object)]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), derive(uniffi::Object))]
 pub struct HubClient {
     secret_key: SecretKey,
     //binding needs the tokio runtime
     endpoint: OnceCell<Endpoint>,
     //kept open so paths can turn direct
     connections: Mutex<HashMap<(String, &'static [u8]), Connection>>,
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     proxy: Mutex<Option<ProxyInfo>>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), uniffi::export(async_runtime = "tokio"))]
 impl HubClient {
     //the app creates and stores it
-    #[uniffi::constructor]
+    #[cfg_attr(not(all(target_family = "wasm", target_os = "unknown")), uniffi::constructor)]
     pub fn new(secret_key: Vec<u8>) -> Result<Arc<Self>, HubError> {
         let bytes: [u8; 32] = secret_key
             .try_into()
@@ -164,6 +179,7 @@ impl HubClient {
             secret_key: SecretKey::from_bytes(&bytes),
             endpoint: OnceCell::new(),
             connections: Mutex::new(HashMap::new()),
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             proxy: Mutex::new(None),
         }))
     }
@@ -421,6 +437,7 @@ impl HubClient {
     }
 
     //local entry point for providers
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     pub async fn start_proxy(self: Arc<Self>, hub: PairedHub) -> Result<ProxyInfo, HubError> {
         let mut proxy = self.proxy.lock().await;
         if let Some(info) = proxy.as_ref() {
@@ -482,6 +499,34 @@ impl HubClient {
         Err(HubError::Unreachable("connection keeps closing".into()))
     }
 
+    //one provider request through the hub
+    pub(crate) async fn forward(
+        &self,
+        hub: &PairedHub,
+        head: ForwardHead,
+        body: &[u8],
+    ) -> Result<Forwarded, HubError> {
+        let mut stream = self.stream(hub, PROVIDERS_ALPN).await?;
+        write_frame(&mut stream.send, &ProvidersRequest::Forward { head })
+            .await
+            .map_err(unreachable)?;
+        stream.send.write_all(body).await.map_err(unreachable)?;
+        stream.send.finish().map_err(unreachable)?;
+        let response = read_frame(&mut stream.recv)
+            .await
+            .map_err(unreachable)?
+            .ok_or_else(|| HubError::Unreachable("hub closed the stream".into()))?;
+        match response {
+            ProvidersResponse::Response { status, headers } => Ok(Forwarded::Response {
+                status,
+                headers,
+                body: stream.recv,
+            }),
+            ProvidersResponse::Error { message } => Ok(Forwarded::Refused(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     async fn data(&self, hub: &PairedHub, request: SyncRequest) -> Result<SyncResponse, HubError> {
         let mut stream = self.stream(hub, SYNC_ALPN).await?;
         let response = stream.request(&request).await?;
@@ -505,6 +550,16 @@ impl HubClient {
             other => Ok(other),
         }
     }
+}
+
+//the body streams as the provider writes it
+pub(crate) enum Forwarded {
+    Response {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: RecvStream,
+    },
+    Refused(String),
 }
 
 //one protocol session
@@ -566,7 +621,7 @@ fn unexpected(response: SecretsResponse) -> HubError {
 
 //a silent hub must never hang the app
 async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Result<T, HubError> {
-    tokio::time::timeout(limit, future)
+    n0_future::time::timeout(limit, future)
         .await
         .map_err(|_| HubError::Unreachable("the hub did not answer in time".into()))
 }

@@ -46,6 +46,37 @@ jobs:
           name: android-client
           path: dist/
 
+  # prebuilt client pulled by the opera web build
+  web-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # must match the wasm-bindgen crate in Cargo.lock
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+
+      - name: Build module
+        run: |
+          cargo build --locked --release --target wasm32-unknown-unknown -p opera-hub-client
+          wasm-bindgen --target web --out-dir bindings             target/wasm32-unknown-unknown/release/opera_hub_client.wasm
+
+      - name: Collect assets
+        run: |
+          mkdir dist
+          cp bindings/opera_hub_client.js dist/opera-hub-client-web.js
+          cp bindings/opera_hub_client_bg.wasm dist/opera-hub-client-web.wasm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-client
+          path: dist/
+
   hub:
     strategy:
       fail-fast: false
@@ -83,7 +114,7 @@ jobs:
           path: dist/
 
   publish:
-    needs: [android-client, hub]
+    needs: [android-client, web-client, hub]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

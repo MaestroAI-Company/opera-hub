@@ -11,13 +11,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use opera_hub_proto::{
-    ForwardHead, PROVIDERS_ALPN, ProvidersRequest, ProvidersResponse, read_frame, write_frame,
-};
+use opera_hub_proto::ForwardHead;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
-use crate::{HubClient, HubError, PairedHub, ProxyInfo, unreachable};
+use crate::{Forwarded, HubClient, HubError, PairedHub, ProxyInfo};
 
 type ProxyBody = BoxBody<Bytes, std::io::Error>;
 
@@ -97,32 +95,23 @@ async fn forward(
         .map_err(|e| HubError::Internal(e.to_string()))?
         .to_bytes();
 
-    let mut stream = client.stream(hub, PROVIDERS_ALPN).await?;
-    write_frame(&mut stream.send, &ProvidersRequest::Forward { head })
-        .await
-        .map_err(unreachable)?;
-    stream.send.write_all(&body).await.map_err(unreachable)?;
-    stream.send.finish().map_err(unreachable)?;
-
-    let response = read_frame(&mut stream.recv)
-        .await
-        .map_err(unreachable)?
-        .ok_or_else(|| HubError::Unreachable("hub closed the stream".into()))?;
-    match response {
-        ProvidersResponse::Response { status, headers } => {
+    match client.forward(hub, head, &body).await? {
+        Forwarded::Response {
+            status,
+            headers,
+            body,
+        } => {
             let mut builder = Response::builder().status(status);
             for (name, value) in headers {
                 builder = builder.header(name, value);
             }
             //streamed so tokens appear live
-            let body =
-                StreamBody::new(ReaderStream::new(stream.recv).map(|chunk| chunk.map(Frame::data)));
+            let body = StreamBody::new(ReaderStream::new(body).map(|chunk| chunk.map(Frame::data)));
             builder
                 .body(BodyExt::boxed(body))
                 .map_err(|e| HubError::Internal(e.to_string()))
         }
-        ProvidersResponse::Error { message } => Ok(plain(StatusCode::BAD_GATEWAY, message)),
-        other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        Forwarded::Refused(message) => Ok(plain(StatusCode::BAD_GATEWAY, message)),
     }
 }
 
