@@ -1,3 +1,5 @@
+pub mod invite;
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -11,6 +13,7 @@ use url::Url;
 pub const PING_ALPN: &[u8] = b"opera/ping/0";
 pub const PAIR_ALPN: &[u8] = b"opera/pair/1";
 pub const HUB_ALPN: &[u8] = b"opera/hub/1";
+pub const ADMIN_ALPN: &[u8] = b"opera/admin/1";
 pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
 pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
 pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
@@ -76,6 +79,21 @@ pub enum HubResponse {
     Hello { name: String, version: String },
     Unpaired,
     Devices { devices: Vec<DeviceInfo> },
+}
+
+//managing the hub needs the admin scope
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminRequest {
+    //a pairing code and link for a new device
+    Invite,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminResponse {
+    Invite { code: String, link: String },
+    Error { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -73,6 +73,17 @@ impl WebHubClient {
         promise(async move { inner.pair(link, device_name, kind).await })
     }
 
+    #[wasm_bindgen(js_name = pairWithCode)]
+    pub fn pair_with_code(&self, code: String, device_name: String, kind: String) -> Promise {
+        let inner = self.inner.clone();
+        promise(async move { inner.pair_with_code(code, device_name, kind).await })
+    }
+
+    pub fn invite(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.invite(hub).await }))
+    }
+
     pub fn status(&self, hub: JsValue) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
         Ok(promise(async move { inner.status(hub).await }))
@@ -179,6 +190,11 @@ impl WebHubClient {
             }
         }))
     }
+}
+
+#[wasm_bindgen(js_name = qrSvg)]
+pub fn qr_svg(text: String, dark: String, light: String) -> Result<String, JsValue> {
+    crate::qr_svg(text, dark, light).map_err(hub_error)
 }
 
 #[wasm_bindgen]

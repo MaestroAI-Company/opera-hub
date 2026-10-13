@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub::store::{self, Store};
-use opera_hub::{config, hub};
+use opera_hub::{config, hub, invite};
 
 #[derive(Parser)]
 #[command(
@@ -29,7 +29,7 @@ struct Cli {
 enum Command {
     #[command(about = "Run the hub in the foreground")]
     Run,
-    #[command(about = "Show a one-time QR code to pair a device")]
+    #[command(about = "Show a one-time QR code and code to pair a device")]
     Pair,
     #[command(about = "List or remove paired devices")]
     Devices {
@@ -82,14 +82,30 @@ fn main() -> Result<()> {
             runtime()?.block_on(hub::run(&data_dir, shutdown_signal()))
         }
         Command::Pair => {
-            let link = hub::pairing_link(&data_dir)?.to_string();
-            qr2term::print_qr(&link)?;
-            println!("{link}");
-            println!(
-                "scan it from Opera within {} minutes, the hub must be running",
-                store::PAIRING_TTL.as_secs() / 60
-            );
-            Ok(())
+            hub::init_logging(&data_dir, false)?;
+            runtime()?.block_on(async {
+                let invite = invite::open(&data_dir).await?;
+                let link = invite.link.to_string();
+                qr2term::print_qr(&link)?;
+                println!("{link}");
+                println!("code: {}", invite.code);
+                println!(
+                    "scan the QR code or type the code in Opera within {} minutes, the hub must be running",
+                    store::PAIRING_TTL.as_secs() / 60
+                );
+                //the code is answered from here
+                tokio::select! {
+                    used = invite.done => {
+                        if used.unwrap_or(false) {
+                            println!("code used, the device finishes pairing");
+                        } else {
+                            println!("the code expired");
+                        }
+                    }
+                    _ = shutdown_signal() => {}
+                }
+                Ok(())
+            })
         }
         Command::Devices { action } => devices(&data_dir, action.unwrap_or(DevicesAction::List)),
         Command::Ticket => {

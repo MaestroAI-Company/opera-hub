@@ -130,3 +130,55 @@ async fn data_sync_and_watch() {
     hub.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_by_code() {
+    let data_dir = std::env::temp_dir().join(format!("opera-hub-code-{}", random_hex::<8>()));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let hub = tokio::spawn({
+        let data_dir = data_dir.clone();
+        async move {
+            opera_hub::hub::run(&data_dir, async {
+                let _ = stop_rx.await;
+            })
+            .await
+        }
+    });
+
+    //a paired phone asks the hub for a code
+    let phone = new_client();
+    let hub_ref = pair(&phone, &data_dir, "phone").await;
+    let invite = phone.invite(hub_ref.clone()).await.unwrap();
+
+    //a wrong code never reaches the invite
+    let stranger = new_client();
+    assert!(
+        stranger
+            .pair_with_code("0000-0000".into(), "stranger".into(), "web".into())
+            .await
+            .is_err()
+    );
+
+    //typed in lower case with spaces
+    let browser = new_client();
+    let typed = invite.code.to_lowercase().replace('-', " ");
+    let paired = browser
+        .pair_with_code(typed, "browser".into(), "web".into())
+        .await
+        .unwrap();
+    assert_eq!(paired.id, hub_ref.id);
+    let devices = browser.devices(paired).await.unwrap();
+    assert!(devices.iter().any(|d| d.id == browser.device_id()));
+
+    //the code works once
+    let late = new_client();
+    assert!(
+        late.pair_with_code(invite.code, "late".into(), "web".into())
+            .await
+            .is_err()
+    );
+
+    stop_tx.send(()).unwrap();
+    hub.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

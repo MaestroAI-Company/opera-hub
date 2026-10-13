@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use opera_hub_proto::{
-    HubRequest, HubResponse, PairRequest, PairResponse, read_frame, write_frame,
+    AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, SCOPE_ADMIN,
+    read_frame, write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -167,9 +168,43 @@ impl Protocol for Session {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Admin {
+    pub data_dir: std::path::PathBuf,
+}
+
+impl Protocol for Admin {
+    const ACCESS: Access = Access::Scope(SCOPE_ADMIN);
+
+    async fn serve<R, W>(&self, peer: Peer, mut reader: R, mut writer: W) -> Result<()>
+    where
+        R: AsyncRead + Unpin + Send,
+        W: AsyncWrite + Unpin + Send,
+    {
+        while let Some(request) = read_frame(&mut reader).await? {
+            let response = match request {
+                AdminRequest::Invite => match crate::invite::open(&self.data_dir).await {
+                    Ok(invite) => {
+                        info!("{} opened a pairing code", peer.short());
+                        AdminResponse::Invite {
+                            code: invite.code,
+                            link: invite.link.to_string(),
+                        }
+                    }
+                    Err(e) => AdminResponse::Error {
+                        message: format!("{e:#}"),
+                    },
+                },
+            };
+            write_frame(&mut writer, &response).await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use opera_hub_proto::{KIND_PHONE, SCOPE_ADMIN, SCOPE_SYNC};
+    use opera_hub_proto::{KIND_PHONE, SCOPE_SYNC};
 
     use super::*;
 

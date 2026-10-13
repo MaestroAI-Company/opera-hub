@@ -10,11 +10,13 @@ use std::time::Duration;
 
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use opera_hub_proto::invite::{self, INVITE_ALPN, InviteRequest, InviteResponse};
 use opera_hub_proto::{
-    ForwardHead, HUB_ALPN, HubRequest, HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN,
-    PairRejection, PairRequest, PairResponse, PairingLink, ProvidersRequest, ProvidersResponse,
-    Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse,
-    SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame, request, write_frame,
+    ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
+    OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink,
+    ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
+    SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, read_frame,
+    request, write_frame,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -24,6 +26,8 @@ use tokio::sync::{Mutex, OnceCell};
 uniffi::setup_scaffolding!();
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+//codes are typed after the hub published them
+const CODE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 //slowest relay upload still allowed to finish
 const MIN_UPLOAD_BYTES_PER_SEC: usize = 32 * 1024;
@@ -81,6 +85,18 @@ pub struct PairedHub {
     pub id: String,
     pub name: String,
     pub relays: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct HubInvite {
+    pub code: String,
+    //shown as a qr code
+    pub link: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +283,52 @@ impl HubClient {
             PairResponse::Rejected {
                 reason: PairRejection::Expired,
             } => Err(HubError::PairingExpired),
+        }
+    }
+
+    //the code a hub or paired device shows
+    pub async fn pair_with_code(
+        &self,
+        code: String,
+        device_name: String,
+        kind: String,
+    ) -> Result<PairedHub, HubError> {
+        let keys = derive_code(code).await?;
+        //a wrong code has no address to find
+        let conn = within(
+            CODE_CONNECT_TIMEOUT,
+            self.connect(EndpointAddr::new(keys.id()), INVITE_ALPN),
+        )
+        .await
+        .map_err(|_| HubError::PairingRejected)??;
+        let (send, recv) = conn.open_bi().await.map_err(unreachable)?;
+        let mut stream = Stream {
+            conn: conn.clone(),
+            send,
+            recv,
+        };
+        let me = self.secret_key.public();
+        let response = stream
+            .request(&InviteRequest {
+                proof: keys.proof(&me),
+            })
+            .await?;
+        stream.finish();
+        conn.close(0u32.into(), b"done");
+        match response {
+            InviteResponse::Link { link } => self.pair(link, device_name, kind).await,
+            InviteResponse::Rejected => Err(HubError::PairingRejected),
+        }
+    }
+
+    //a code and qr link for a new device
+    pub async fn invite(&self, hub: PairedHub) -> Result<HubInvite, HubError> {
+        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
+        let response = stream.request(&AdminRequest::Invite).await?;
+        stream.finish();
+        match response {
+            AdminResponse::Invite { code, link } => Ok(HubInvite { code, link }),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
         }
     }
 
@@ -661,6 +723,39 @@ fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
 
 fn unexpected(response: SecretsResponse) -> HubError {
     HubError::Internal(format!("unexpected answer {response:?}"))
+}
+
+//argon2 is slow on purpose
+async fn derive_code(code: String) -> Result<invite::InviteKeys, HubError> {
+    let invalid = |e: anyhow::Error| HubError::InvalidLink(format!("{e:#}"));
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    {
+        tokio::task::spawn_blocking(move || invite::derive(&code))
+            .await
+            .map_err(|e| HubError::Internal(e.to_string()))?
+            .map_err(invalid)
+    }
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    {
+        invite::derive(&code).map_err(invalid)
+    }
+}
+
+//apps draw pairing links without a qr library
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    uniffi::export
+)]
+pub fn qr_svg(text: String, dark: String, light: String) -> Result<String, HubError> {
+    use qrcode::render::svg;
+    let code =
+        qrcode::QrCode::new(text.as_bytes()).map_err(|e| HubError::Internal(e.to_string()))?;
+    Ok(code
+        .render::<svg::Color>()
+        .dark_color(svg::Color(&dark))
+        .light_color(svg::Color(&light))
+        .quiet_zone(false)
+        .build())
 }
 
 //a silent hub must never hang the app
