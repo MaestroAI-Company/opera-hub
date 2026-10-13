@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use opera_hub_proto::{
-    CatalogModel, LlamaStatus, ModelDownload, ModelFile, ModelRepo, ModelsRequest, ModelsResponse,
-    SCOPE_ADMIN, read_frame, write_frame,
+    CatalogModel, InstalledModel, LlamaStatus, ModelDownload, ModelFile, ModelRepo, ModelsRequest,
+    ModelsResponse, SCOPE_ADMIN, read_frame, write_frame,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -30,89 +30,77 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL: Duration = Duration::from_millis(300);
 
 //official builds from the model makers, smallest first
-const CATALOG: [(&str, &str, &str, &str, u64); 12] = [
+const CATALOG: [(&str, &str, &str, u64); 12] = [
     (
         "ggml-org/Qwen3.5-0.8B-GGUF",
         "Qwen3.5-0.8B-Q4_0.gguf",
         "Qwen3.5 0.8B",
-        "Tiny and fast, fine on any computer",
         563_036_064,
     ),
     (
         "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
         "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
         "LFM2.5 1.2B",
-        "Very fast small model from Liquid AI, 2 GB of memory",
         730_895_168,
     ),
     (
         "mistralai/Ministral-3-3B-Instruct-2512-GGUF",
         "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
         "Ministral 3 3B",
-        "Small model from Mistral AI, 4 GB of memory",
         2_147_023_008,
     ),
     (
         "ggml-org/gemma-4-E2B-it-GGUF",
         "gemma-4-E2B-it-Q4_0.gguf",
         "Gemma 4 E2B",
-        "Small everyday model, 4 GB of memory",
         2_840_000_000,
     ),
     (
         "ggml-org/gemma-4-E4B-it-GGUF",
         "gemma-4-E4B-it-Q4_0.gguf",
         "Gemma 4 E4B",
-        "Balanced quality and speed, 6 GB of memory",
         4_590_000_000,
     ),
     (
         "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
         "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
         "Ministral 3 8B",
-        "Balanced model from Mistral AI, 8 GB of memory",
         5_198_911_904,
     ),
     (
         "ibm-granite/granite-4.2-8b-GGUF",
         "granite-4.2-8b-Q4_K_M.gguf",
         "Granite 4.2 8B",
-        "Precise work model from IBM, 8 GB of memory",
         5_347_917_952,
     ),
     (
         "ggml-org/gemma-4-12B-it-GGUF",
         "gemma-4-12B-it-Q4_0.gguf",
         "Gemma 4 12B",
-        "Stronger answers, 10 GB of memory",
         7_220_000_000,
     ),
     (
         "mistralai/Ministral-3-14B-Instruct-2512-GGUF",
         "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
         "Ministral 3 14B",
-        "Strongest small model from Mistral AI, 12 GB of memory",
         8_239_593_024,
     ),
     (
         "ggml-org/gemma-4-26B-A4B-it-GGUF",
         "gemma-4-26B-A4B-it-Q4_0.gguf",
         "Gemma 4 26B A4B",
-        "Large mixture of experts, quick for its size, 18 GB of memory",
         14_620_000_000,
     ),
     (
         "ggml-org/Qwen3.8-27B-GGUF",
         "Qwen3.8-27B-Q4_K_M.gguf",
         "Qwen3.8 27B",
-        "High quality, best with a GPU, 22 GB of memory",
         18_970_000_000,
     ),
     (
         "ggml-org/Qwen3.6-35B-A3B-GGUF",
         "Qwen3.6-35B-A3B-Q4_K_M.gguf",
         "Qwen3.6 35B A3B",
-        "Large mixture of experts, 24 GB of memory",
         20_420_000_000,
     ),
 ];
@@ -120,11 +108,10 @@ const CATALOG: [(&str, &str, &str, &str, u64); 12] = [
 pub fn catalog() -> Vec<CatalogModel> {
     CATALOG
         .iter()
-        .map(|(repo, file, name, description, size)| CatalogModel {
+        .map(|(repo, file, name, size)| CatalogModel {
             repo: repo.to_string(),
             file: file.to_string(),
             name: name.to_string(),
-            description: description.to_string(),
             size: *size,
         })
         .collect()
@@ -239,6 +226,30 @@ impl Llama {
         self.dir.join("models")
     }
 
+    //repo each downloaded file came from
+    fn sources_path(&self) -> PathBuf {
+        self.dir.join("sources.json")
+    }
+
+    fn sources(&self) -> HashMap<String, String> {
+        std::fs::read(self.sources_path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn set_source(&self, file: &str, repo: Option<&str>) -> Result<()> {
+        //the inner lock serializes writers
+        let _inner = self.inner.lock().unwrap();
+        let mut sources = self.sources();
+        match repo {
+            Some(repo) => sources.insert(file.to_string(), repo.to_string()),
+            None => sources.remove(file),
+        };
+        std::fs::write(self.sources_path(), serde_json::to_vec(&sources)?)?;
+        Ok(())
+    }
+
     //the openai endpoint once a model can answer
     pub fn base_url(&self) -> Option<String> {
         let inner = self.inner.lock().unwrap();
@@ -248,16 +259,19 @@ impl Llama {
         }
     }
 
-    pub fn installed(&self) -> Vec<ModelFile> {
+    pub fn installed(&self) -> Vec<InstalledModel> {
         let Ok(entries) = std::fs::read_dir(self.models_dir()) else {
             return Vec::new();
         };
-        let mut models: Vec<ModelFile> = entries
+        let mut sources = self.sources();
+        let mut models: Vec<InstalledModel> = entries
             .flatten()
             .filter_map(|entry| {
                 let file = entry.file_name().to_string_lossy().into_owned();
                 let size = entry.metadata().ok()?.len();
-                file.ends_with(".gguf").then_some(ModelFile { file, size })
+                let repo = sources.remove(&file);
+                file.ends_with(".gguf")
+                    .then_some(InstalledModel { file, size, repo })
             })
             .collect();
         models.sort_by(|a, b| a.file.cmp(&b.file));
@@ -610,6 +624,7 @@ impl Llama {
         out.flush().await?;
         drop(out);
         ensure!(total == 0 || received == total, "the download ended early");
+        self.set_source(file, Some(repo))?;
         std::fs::rename(&part, models.join(file))?;
         Ok(())
     }
@@ -638,6 +653,7 @@ impl Llama {
         self.stop_server();
         std::fs::remove_file(self.models_dir().join(file))
             .with_context(|| format!("cannot delete {file}"))?;
+        self.set_source(file, None)?;
         self.refresh();
         Ok(())
     }

@@ -139,7 +139,6 @@ pub struct CatalogModel {
     pub repo: String,
     pub file: String,
     pub name: String,
-    pub description: String,
     pub size: u64,
 }
 
@@ -171,6 +170,18 @@ pub struct ModelFile {
     derive(uniffi::Record)
 )]
 #[serde(rename_all = "camelCase")]
+pub struct InstalledModel {
+    pub file: String,
+    pub size: u64,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelDownload {
     pub repo: String,
     pub file: String,
@@ -189,7 +200,7 @@ pub struct LlamaStatus {
     pub state: String,
     pub backend: Option<String>,
     pub message: Option<String>,
-    pub installed: Vec<ModelFile>,
+    pub installed: Vec<InstalledModel>,
     pub downloads: Vec<ModelDownload>,
 }
 
@@ -473,7 +484,6 @@ impl HubClient {
                     repo: m.repo,
                     file: m.file,
                     name: m.name,
-                    description: m.description,
                     size: m.size,
                 })
                 .collect()),
@@ -992,7 +1002,15 @@ impl HubClient {
                 state: status.state,
                 backend: status.backend,
                 message: status.message,
-                installed: status.installed.into_iter().map(model_file).collect(),
+                installed: status
+                    .installed
+                    .into_iter()
+                    .map(|m| InstalledModel {
+                        file: m.file,
+                        size: m.size,
+                        repo: m.repo,
+                    })
+                    .collect(),
                 downloads: status
                     .downloads
                     .into_iter()

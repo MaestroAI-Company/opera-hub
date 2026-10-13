@@ -313,7 +313,6 @@ pub struct CatalogModel {
     pub repo: String,
     pub file: String,
     pub name: String,
-    pub description: String,
     pub size: u64,
 }
 
@@ -346,8 +345,16 @@ pub struct LlamaStatus {
     //cpu, vulkan, cuda or metal
     pub backend: Option<String>,
     pub message: Option<String>,
-    pub installed: Vec<ModelFile>,
+    pub installed: Vec<InstalledModel>,
     pub downloads: Vec<ModelDownload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledModel {
+    pub file: String,
+    pub size: u64,
+    //unknown for files copied by hand
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

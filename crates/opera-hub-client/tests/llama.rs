@@ -84,16 +84,26 @@ async fn hub_runs_llama_models() {
         status = phone.models_status(hub_ref.clone()).await.unwrap();
     }
     assert_eq!(status.state, "running", "{status:?}");
-    assert!(status.installed.iter().any(|m| m.file == small.file));
+    assert!(
+        status
+            .installed
+            .iter()
+            .any(|m| m.file == small.file && m.repo.as_deref() == Some(small.repo.as_str()))
+    );
 
     let providers = phone.providers(hub_ref.clone()).await.unwrap();
-    assert!(providers.iter().any(|p| p.id == "llamacpp"), "{providers:?}");
+    assert!(
+        providers.iter().any(|p| p.id == "llamacpp"),
+        "{providers:?}"
+    );
     let proxy = phone.clone().start_proxy(hub_ref.clone()).await.unwrap();
     let model = small.file.trim_end_matches(".gguf");
     let answer = http_post(
         proxy.port,
         &format!("/{}/llamacpp/chat/completions", proxy.token),
-        &format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":8}}"#),
+        &format!(
+            r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":8}}"#
+        ),
     )
     .await;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
