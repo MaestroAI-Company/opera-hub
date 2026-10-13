@@ -79,9 +79,16 @@ pub enum HubRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HubResponse {
-    Hello { name: String, version: String },
+    Hello {
+        name: String,
+        version: String,
+        //a newer release the hub can install
+        update: Option<String>,
+    },
     Unpaired,
-    Devices { devices: Vec<DeviceInfo> },
+    Devices {
+        devices: Vec<DeviceInfo>,
+    },
 }
 
 //managing the hub needs the admin scope
@@ -92,6 +99,8 @@ pub enum AdminRequest {
     Invite,
     Settings,
     SetSettings { settings: HubSettings },
+    //install the newest release and restart
+    Update,
 }
 
 //hub wide toggles, admins change them
@@ -118,6 +127,7 @@ impl Default for HubSettings {
 pub enum AdminResponse {
     Invite { code: String, link: String },
     Settings { settings: HubSettings },
+    Updating { version: String },
     Error { message: String },
 }
 

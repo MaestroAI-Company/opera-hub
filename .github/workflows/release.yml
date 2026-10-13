@@ -108,6 +108,17 @@ jobs:
             cp target/release/opera-hubw dist/opera-hubw-macos-aarch64
           fi
 
+      # per user setup, also what windows hubs update from
+      - name: Build installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install nsis -y --no-progress
+          mkdir stage
+          cp target/release/opera-hub.exe target/release/opera-hubw.exe stage/
+          "/c/Program Files (x86)/NSIS/makensis.exe" -DVERSION="${GITHUB_REF_NAME#v}"             -DDIST="$PWD/stage" installer/windows/opera-hub.nsi
+          mv stage/opera-hub-setup-windows-x86_64.exe dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -117,10 +128,16 @@ jobs:
     needs: [android-client, web-client, hub]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # linux and macos install from this script
+      - name: Add install script
+        run: cp installer/install.sh dist/
 
       - name: Checksums
         working-directory: dist

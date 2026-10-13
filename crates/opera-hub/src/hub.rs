@@ -25,6 +25,7 @@ use crate::secrets::{Secrets, http_client};
 use crate::settings::Settings;
 use crate::store::Store;
 use crate::sync::DataSync;
+use crate::update;
 
 async fn bind(config: &Config, key: Option<SecretKey>, port: Option<u16>) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0).relay_mode(config.relay_mode());
@@ -49,7 +50,7 @@ pub async fn run_with_targets(
     shutdown: impl Future<Output = ()>,
     targets: Vec<Target>,
 ) -> Result<()> {
-    let running = start(data_dir, targets).await?;
+    let running = start(data_dir, targets, true).await?;
     shutdown.await;
     running.stop().await
 }
@@ -60,7 +61,8 @@ pub async fn run_notify(
     started: tokio::sync::oneshot::Sender<Result<()>>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let running = match start(data_dir, default_targets()).await {
+    //the app updates its own hub
+    let running = match start(data_dir, default_targets(), false).await {
         Ok(running) => running,
         Err(e) => {
             let _ = started.send(Err(anyhow!("{e:#}")));
@@ -75,6 +77,7 @@ pub async fn run_notify(
 struct Running {
     router: Router,
     lan: tokio::task::JoinHandle<()>,
+    updates: Option<tokio::task::JoinHandle<()>>,
     _lock: std::fs::File,
 }
 
@@ -82,12 +85,16 @@ impl Running {
     async fn stop(self) -> Result<()> {
         info!("hub stopping");
         self.lan.abort();
+        if let Some(updates) = self.updates {
+            updates.abort();
+        }
         self.router.shutdown().await?;
         Ok(())
     }
 }
 
-async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
+//standalone hubs check for and install releases
+async fn start(data_dir: &Path, targets: Vec<Target>, standalone: bool) -> Result<Running> {
     //held until the hub stops
     let lock = lock(data_dir)?;
     let config = Config::load(data_dir)?;
@@ -118,6 +125,13 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let store = Arc::new(Store::new(data_dir));
     let db = Arc::new(Db::open(data_dir)?);
     let http = http_client()?;
+    let (latest, updates) = if standalone {
+        let (sender, latest) = tokio::sync::watch::channel(None);
+        let task = tokio::spawn(update::watch_releases(http.clone(), sender));
+        (Some(latest), Some(task))
+    } else {
+        (None, None)
+    };
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))
@@ -137,6 +151,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Session {
                     store: store.clone(),
                     name,
+                    latest: latest.clone(),
                 },
                 &store,
             ),
@@ -147,6 +162,8 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Admin {
                     data_dir: data_dir.to_path_buf(),
                     settings: settings.clone(),
+                    http: http.clone(),
+                    latest,
                 },
                 &store,
             ),
@@ -181,6 +198,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     Ok(Running {
         router,
         lan,
+        updates,
         _lock: lock,
     })
 }

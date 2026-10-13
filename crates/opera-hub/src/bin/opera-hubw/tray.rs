@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use opera_hub::config::Config;
 use opera_hub::invite;
+use opera_hub::secrets::http_client;
 use opera_hub::store::Store;
+use opera_hub::update;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{ElementState, Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
@@ -19,6 +21,8 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const REFRESH: Duration = Duration::from_secs(5);
+//github rate limits anonymous checks
+const UPDATE_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
 const OPERA_RED: [u8; 3] = [0xFF, 0x1A, 0x1A];
 const QR_PANEL_SIZE: f64 = 280.0;
 //room for the typed code under the qr
@@ -31,6 +35,12 @@ const QR_PANEL_GAP: f64 = 8.0;
 const QR_QUIET_MODULES: usize = 4;
 
 struct Labels {
+    update: &'static str,
+    update_title: &'static str,
+    update_message: &'static str,
+    install: &'static str,
+    later: &'static str,
+    update_failed: &'static str,
     pair: &'static str,
     scan: &'static str,
     quit: &'static str,
@@ -43,6 +53,12 @@ fn labels() -> Labels {
     let french = sys_locale::get_locale().is_some_and(|l| l.starts_with("fr"));
     if french {
         Labels {
+            update: "Installer Opera Hub {version}",
+            update_title: "Mise à jour d'Opera Hub",
+            update_message: "Opera Hub {version} est disponible (vous avez la {current}). L'installer maintenant ? Le hub redémarre en quelques secondes et vos appareils se reconnectent tout seuls.",
+            install: "Installer",
+            later: "Plus tard",
+            update_failed: "La mise à jour n'a pas pu être téléchargée :",
             pair: "Appairer un appareil",
             scan: "Scannez ou tapez le code dans Opera · 10 min",
             quit: "Quitter",
@@ -52,6 +68,12 @@ fn labels() -> Labels {
         }
     } else {
         Labels {
+            update: "Install Opera Hub {version}",
+            update_title: "Opera Hub update",
+            update_message: "Opera Hub {version} is available (you have {current}). Install it now? The hub restarts in a few seconds and your devices reconnect on their own.",
+            install: "Install",
+            later: "Later",
+            update_failed: "The update could not be downloaded:",
             pair: "Pair a device",
             scan: "Scan or type the code in Opera · 10 min",
             quit: "Quit",
@@ -446,6 +468,66 @@ fn draw_pairing(pairing: &mut PairingWindow) -> Result<()> {
 
 enum UserEvent {
     Menu(MenuEvent),
+    //a newer release, none when up to date
+    Update(Option<String>),
+}
+
+fn check_updates(runtime: &Handle, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+    runtime.spawn(async move {
+        let found = match http_client() {
+            Ok(http) => update::newer_release(&http).await,
+            Err(e) => Err(e),
+        };
+        match found {
+            Ok(found) => {
+                let _ = proxy.send_event(UserEvent::Update(found));
+            }
+            Err(e) => tracing::warn!("update check failed: {e:#}"),
+        }
+    });
+}
+
+//true when the user wants it now
+fn ask_update(labels: &Labels, version: &str) -> bool {
+    let message = labels
+        .update_message
+        .replace("{version}", version)
+        .replace("{current}", update::VERSION);
+    rfd::MessageDialog::new()
+        .set_title(labels.update_title)
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(
+            labels.install.into(),
+            labels.later.into(),
+        ))
+        .show()
+        == rfd::MessageDialogResult::Custom(labels.install.into())
+}
+
+//the installer replaces and restarts the hub
+fn install_update(runtime: &Handle, labels: &Labels, version: &str) {
+    let result = runtime.block_on(async {
+        let http = http_client()?;
+        #[cfg(windows)]
+        {
+            let installer = update::download_installer(&http, version).await?;
+            std::process::Command::new(installer).spawn()?;
+            anyhow::Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            update::apply(&http, version).await?;
+            update::restart()
+        }
+    });
+    if let Err(e) = result {
+        tracing::error!("update failed: {e:#}");
+        rfd::MessageDialog::new()
+            .set_title(labels.update_title)
+            .set_description(format!("{} {e:#}", labels.update_failed))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
 }
 
 pub fn run(
@@ -470,6 +552,11 @@ pub fn run(
         let _ = proxy.send_event(UserEvent::Menu(event));
     }));
 
+    let update_proxy = event_loop.create_proxy();
+    let mut next_check = Instant::now();
+    //asked once per version
+    let mut offered: Option<String> = None;
+    let install = MenuItem::new("", true, None);
     let title = MenuItem::new(format!("Opera Hub · {name}"), false, None);
     let devices = MenuItem::new(devices_label(&labels, &data_dir), false, None);
     let pair = MenuItem::new(labels.pair, true, None);
@@ -507,6 +594,31 @@ pub fn run(
             }
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 devices.set_text(devices_label(&labels, &data_dir));
+                if Instant::now() >= next_check {
+                    next_check = Instant::now() + UPDATE_CHECK;
+                    check_updates(&runtime, update_proxy.clone());
+                }
+            }
+            Event::UserEvent(UserEvent::Update(found)) => {
+                let Some(version) = found else {
+                    let _ = menu.remove(&install);
+                    return;
+                };
+                install.set_text(labels.update.replace("{version}", &version));
+                if offered.is_none() {
+                    let _ = menu.insert(&install, 3);
+                }
+                if offered.as_deref() != Some(version.as_str()) {
+                    offered = Some(version.clone());
+                    if ask_update(&labels, &version) {
+                        install_update(&runtime, &labels, &version);
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::Menu(event)) if event.id == *install.id() => {
+                if let Some(version) = offered.clone() {
+                    install_update(&runtime, &labels, &version);
+                }
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *pair.id() => {
                 let anchor = tray.as_ref().and_then(|t| t.rect());

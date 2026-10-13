@@ -139,6 +139,8 @@ pub struct HubStatus {
     pub version: String,
     //false while relayed
     pub direct: bool,
+    //a newer release the hub can install
+    pub update: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +369,18 @@ impl HubClient {
         }
     }
 
+    //the hub installs the release and restarts
+    pub async fn update_hub(&self, hub: PairedHub) -> Result<String, HubError> {
+        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
+        let response = stream.request(&AdminRequest::Update).await?;
+        stream.finish();
+        match response {
+            AdminResponse::Updating { version } => Ok(version),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     pub async fn hub_settings(&self, hub: PairedHub) -> Result<HubSettings, HubError> {
         self.admin(&hub, AdminRequest::Settings).await
     }
@@ -408,10 +422,15 @@ impl HubClient {
             .any(|path| path.is_selected() && path.is_ip());
         stream.finish();
         match response {
-            HubResponse::Hello { name, version } => Ok(HubStatus {
+            HubResponse::Hello {
+                name,
+                version,
+                update,
+            } => Ok(HubStatus {
                 name,
                 version,
                 direct,
+                update,
             }),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }

@@ -136,6 +136,8 @@ impl Protocol for Pair {
 pub struct Session {
     pub store: Arc<Store>,
     pub name: Arc<str>,
+    //none when the hub lives inside the app
+    pub latest: Option<tokio::sync::watch::Receiver<Option<String>>>,
 }
 
 impl Protocol for Session {
@@ -151,6 +153,7 @@ impl Protocol for Session {
                 HubRequest::Hello => HubResponse::Hello {
                     name: self.name.to_string(),
                     version: env!("CARGO_PKG_VERSION").into(),
+                    update: self.latest.as_ref().and_then(|l| l.borrow().clone()),
                 },
                 HubRequest::Devices => HubResponse::Devices {
                     devices: self.store.devices()?,
@@ -172,6 +175,9 @@ impl Protocol for Session {
 pub struct Admin {
     pub data_dir: std::path::PathBuf,
     pub settings: Arc<crate::settings::Settings>,
+    pub http: reqwest::Client,
+    //none when the hub lives inside the app
+    pub latest: Option<tokio::sync::watch::Receiver<Option<String>>>,
 }
 
 impl std::fmt::Debug for Admin {
@@ -205,6 +211,17 @@ impl Protocol for Admin {
                 AdminRequest::Settings => AdminResponse::Settings {
                     settings: self.settings.get(),
                 },
+                AdminRequest::Update => match self.update().await {
+                    Ok(version) => {
+                        info!("{} asked for opera hub {version}", peer.short());
+                        write_frame(&mut writer, &AdminResponse::Updating { version }).await?;
+                        restart_soon();
+                        return Ok(());
+                    }
+                    Err(e) => AdminResponse::Error {
+                        message: format!("{e:#}"),
+                    },
+                },
                 AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
                     Ok(()) => {
                         info!("{} changed the hub settings", peer.short());
@@ -219,6 +236,36 @@ impl Protocol for Admin {
         }
         Ok(())
     }
+}
+
+impl Admin {
+    async fn update(&self) -> Result<String> {
+        let Some(latest) = &self.latest else {
+            anyhow::bail!("this hub updates with the Opera app");
+        };
+        //the guard must not live across an await
+        let known = latest.borrow().clone();
+        let version = match known {
+            Some(version) => version,
+            None => crate::update::newer_release(&self.http)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("this hub is up to date"))?,
+        };
+        crate::update::apply(&self.http, &version).await?;
+        Ok(version)
+    }
+}
+
+//windows installers restart the hub themselves
+fn restart_soon() {
+    #[cfg(not(windows))]
+    tokio::spawn(async {
+        //lets the answer reach the device
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Err(e) = crate::update::restart() {
+            warn!("restart after update failed: {e:#}");
+        }
+    });
 }
 
 #[cfg(test)]
