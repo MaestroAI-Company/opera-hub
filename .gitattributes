@@ -1,0 +1,2 @@
+# shell scripts break with windows line endings
+*.sh text eol=lf
