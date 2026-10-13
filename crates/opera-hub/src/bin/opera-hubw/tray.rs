@@ -6,13 +6,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use opera_hub::config::Config;
-use opera_hub::hub;
+use opera_hub::invite;
 use opera_hub::store::Store;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{ElementState, Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
 use tao::keyboard::Key;
 use tao::window::{Window, WindowBuilder};
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -20,6 +21,10 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 const REFRESH: Duration = Duration::from_secs(5);
 const OPERA_RED: [u8; 3] = [0xFF, 0x1A, 0x1A];
 const QR_PANEL_SIZE: f64 = 280.0;
+//room for the typed code under the qr
+const CODE_STRIP: f64 = 64.0;
+//one glyph pixel per this share of the width
+const CODE_COLUMNS: usize = 60;
 //space between the tray icon and the panel
 const QR_PANEL_GAP: f64 = 8.0;
 //white border scanners need around the code
@@ -39,7 +44,7 @@ fn labels() -> Labels {
     if french {
         Labels {
             pair: "Appairer un appareil",
-            scan: "Scannez avec Opera · valable 10 min",
+            scan: "Scannez ou tapez le code dans Opera · 10 min",
             quit: "Quitter",
             none: "Aucun appareil appairé",
             one: "1 appareil appairé",
@@ -48,7 +53,7 @@ fn labels() -> Labels {
     } else {
         Labels {
             pair: "Pair a device",
-            scan: "Scan with Opera · valid 10 min",
+            scan: "Scan or type the code in Opera · 10 min",
             quit: "Quit",
             none: "No paired device",
             one: "1 paired device",
@@ -88,16 +93,225 @@ struct PairingWindow {
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     dark: Vec<bool>,
     modules: usize,
+    code: String,
+}
+
+//5x7 glyphs, the panel loads no font
+const FONT: [(char, [u8; 7]); 33] = [
+    (
+        '0',
+        [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        '1',
+        [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+    ),
+    (
+        '2',
+        [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+    ),
+    (
+        '3',
+        [
+            0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        '4',
+        [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+    ),
+    (
+        '5',
+        [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        '6',
+        [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        '7',
+        [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+    ),
+    (
+        '8',
+        [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        '9',
+        [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+    ),
+    (
+        'A',
+        [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+    ),
+    (
+        'B',
+        [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+    ),
+    (
+        'C',
+        [
+            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+        ],
+    ),
+    (
+        'D',
+        [
+            0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+        ],
+    ),
+    (
+        'E',
+        [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+    ),
+    (
+        'F',
+        [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+    ),
+    (
+        'G',
+        [
+            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+    ),
+    (
+        'H',
+        [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+    ),
+    (
+        'J',
+        [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+        ],
+    ),
+    (
+        'K',
+        [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+    ),
+    (
+        'M',
+        [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+    ),
+    (
+        'N',
+        [
+            0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001,
+        ],
+    ),
+    (
+        'P',
+        [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+    ),
+    (
+        'Q',
+        [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+    ),
+    (
+        'R',
+        [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+    ),
+    (
+        'S',
+        [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+    ),
+    (
+        'T',
+        [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+    ),
+    (
+        'V',
+        [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+    ),
+    (
+        'W',
+        [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+    ),
+    (
+        'X',
+        [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+    ),
+    (
+        'Y',
+        [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+    ),
+    (
+        'Z',
+        [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+    ),
+    (
+        '-',
+        [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+    ),
+];
+
+fn glyph(c: char) -> Option<&'static [u8; 7]> {
+    FONT.iter().find(|(g, _)| *g == c).map(|(_, rows)| rows)
 }
 
 //each click makes a new one time code
 fn open_pairing(
     target: &EventLoopWindowTarget<UserEvent>,
+    runtime: &Handle,
     data_dir: &Path,
     labels: &Labels,
     anchor: Option<tray_icon::Rect>,
 ) -> Result<PairingWindow> {
-    let link = hub::pairing_link(data_dir)?.to_string();
+    let invite = runtime.block_on(invite::open(data_dir))?;
+    let link = invite.link.to_string();
     let code = qrcode::QrCode::new(link.as_bytes())?;
     let dark = code
         .to_colors()
@@ -106,7 +320,7 @@ fn open_pairing(
         .collect();
     let builder = WindowBuilder::new()
         .with_title(labels.scan)
-        .with_inner_size(LogicalSize::new(QR_PANEL_SIZE, QR_PANEL_SIZE))
+        .with_inner_size(LogicalSize::new(QR_PANEL_SIZE, QR_PANEL_SIZE + CODE_STRIP))
         .with_resizable(false)
         .with_decorations(false)
         .with_always_on_top(true)
@@ -131,6 +345,7 @@ fn open_pairing(
         surface,
         dark,
         modules: code.width(),
+        code: invite.code,
     })
 }
 
@@ -182,10 +397,12 @@ fn draw_pairing(pairing: &mut PairingWindow) -> Result<()> {
         .buffer_mut()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (width, height) = (size.width as usize, size.height as usize);
+    //the qr fills the square, the code the strip
+    let square = width.min(height);
     let total = pairing.modules + QR_QUIET_MODULES * 2;
-    let scale = (width.min(height) / total).max(1);
+    let scale = (square / total).max(1);
     let left = (width.saturating_sub(total * scale)) / 2;
-    let top = (height.saturating_sub(total * scale)) / 2;
+    let top = (square.saturating_sub(total * scale)) / 2;
     for y in 0..height {
         for x in 0..width {
             let module = |pixel: usize, start: usize| {
@@ -200,6 +417,29 @@ fn draw_pairing(pairing: &mut PairingWindow) -> Result<()> {
             buffer[y * width + x] = if dark { 0x000000 } else { 0xFFFFFF };
         }
     }
+
+    let pixel = (width / CODE_COLUMNS).max(1);
+    let advance = pixel * 6;
+    let text_width = pairing.code.chars().count() * advance - pixel;
+    let text_left = width.saturating_sub(text_width) / 2;
+    let text_top = square + height.saturating_sub(square).saturating_sub(pixel * 7) / 2;
+    for (i, c) in pairing.code.chars().enumerate() {
+        let Some(rows) = glyph(c) else { continue };
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..5 {
+                if bits & (0b10000 >> col) == 0 {
+                    continue;
+                }
+                let x0 = text_left + i * advance + col * pixel;
+                let y0 = text_top + row * pixel;
+                for y in y0..(y0 + pixel).min(height) {
+                    for x in x0..(x0 + pixel).min(width) {
+                        buffer[y * width + x] = 0x000000;
+                    }
+                }
+            }
+        }
+    }
     buffer.present().map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
@@ -208,7 +448,12 @@ enum UserEvent {
     Menu(MenuEvent),
 }
 
-pub fn run(data_dir: PathBuf, stop: oneshot::Sender<()>, hub_thread: JoinHandle<()>) -> Result<()> {
+pub fn run(
+    data_dir: PathBuf,
+    runtime: Handle,
+    stop: oneshot::Sender<()>,
+    hub_thread: JoinHandle<()>,
+) -> Result<()> {
     let labels = labels();
     let name = Config::load(&data_dir)?.hub_name();
 
@@ -265,7 +510,7 @@ pub fn run(data_dir: PathBuf, stop: oneshot::Sender<()>, hub_thread: JoinHandle<
             }
             Event::UserEvent(UserEvent::Menu(event)) if event.id == *pair.id() => {
                 let anchor = tray.as_ref().and_then(|t| t.rect());
-                match open_pairing(target, &data_dir, &labels, anchor) {
+                match open_pairing(target, &runtime, &data_dir, &labels, anchor) {
                     Ok(window) => pairing = Some(window),
                     Err(e) => tracing::error!("cannot show the pairing code: {e:#}"),
                 }

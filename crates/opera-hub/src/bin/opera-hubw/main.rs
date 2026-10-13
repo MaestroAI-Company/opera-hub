@@ -19,16 +19,15 @@ fn main() -> Result<()> {
     hub::init_logging(&data_dir, true)?;
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    //the tray opens pairing codes on it too
+    let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
     let hub_thread = std::thread::spawn({
         let data_dir = data_dir.clone();
+        let runtime = runtime.clone();
         move || {
-            let result = tokio::runtime::Runtime::new()
-                .map_err(anyhow::Error::from)
-                .and_then(|runtime| {
-                    runtime.block_on(hub::run(&data_dir, async {
-                        let _ = stop_rx.await;
-                    }))
-                });
+            let result = runtime.block_on(hub::run(&data_dir, async {
+                let _ = stop_rx.await;
+            }));
             if let Err(e) = result {
                 tracing::error!("hub stopped: {e:#}");
                 //no tray left to quit from
@@ -39,12 +38,12 @@ fn main() -> Result<()> {
 
     //both oses want the tray on the main thread
     #[cfg(any(windows, target_os = "macos"))]
-    return tray::run(data_dir, stop_tx, hub_thread);
+    return tray::run(data_dir, runtime.handle().clone(), stop_tx, hub_thread);
 
     //no tray here so run until killed
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        let _keep_running = stop_tx;
+        let _keep_running = (stop_tx, runtime);
         let _ = hub_thread.join();
         Ok(())
     }
