@@ -18,9 +18,11 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{self, Config};
 use crate::db::Db;
+use crate::lan;
 use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
+use crate::settings::Settings;
 use crate::store::Store;
 use crate::sync::DataSync;
 
@@ -72,12 +74,14 @@ pub async fn run_notify(
 
 struct Running {
     router: Router,
+    lan: tokio::task::JoinHandle<()>,
     _lock: std::fs::File,
 }
 
 impl Running {
     async fn stop(self) -> Result<()> {
         info!("hub stopping");
+        self.lan.abort();
         self.router.shutdown().await?;
         Ok(())
     }
@@ -104,6 +108,13 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
         }
     });
 
+    let settings = Arc::new(Settings::load(data_dir)?);
+    let lan = tokio::spawn(follow_lan_setting(
+        settings.subscribe(),
+        endpoint.id().to_string(),
+        config.hub_name(),
+        endpoint.bound_sockets(),
+    ));
     let store = Arc::new(Store::new(data_dir));
     let db = Arc::new(Db::open(data_dir)?);
     let http = http_client()?;
@@ -135,6 +146,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             OverIroh::new(
                 Admin {
                     data_dir: data_dir.to_path_buf(),
+                    settings: settings.clone(),
                 },
                 &store,
             ),
@@ -160,6 +172,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Providers {
                     http,
                     targets: Arc::new(targets),
+                    settings,
                 },
                 &store,
             ),
@@ -167,8 +180,34 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
         .spawn();
     Ok(Running {
         router,
+        lan,
         _lock: lock,
     })
+}
+
+//announces while the setting allows it
+async fn follow_lan_setting(
+    mut settings: tokio::sync::watch::Receiver<opera_hub_proto::HubSettings>,
+    id: String,
+    name: String,
+    sockets: Vec<SocketAddr>,
+) {
+    let Some(port) = sockets.iter().find(|s| s.is_ipv4()).map(|s| s.port()) else {
+        return;
+    };
+    loop {
+        let announcement = if settings.borrow_and_update().lan_discovery {
+            lan::announce(&id, &name, port)
+                .inspect_err(|e| warn!("not announced on the local network: {e:#}"))
+                .ok()
+        } else {
+            None
+        };
+        if settings.changed().await.is_err() {
+            return;
+        }
+        drop(announcement);
+    }
 }
 
 const LOCK_FILE: &str = "hub.lock";

@@ -182,3 +182,52 @@ async fn pairing_by_code() {
     hub.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hub_settings_and_lan() {
+    let data_dir = std::env::temp_dir().join(format!("opera-hub-lan-{}", random_hex::<8>()));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let hub = tokio::spawn({
+        let data_dir = data_dir.clone();
+        async move {
+            opera_hub::hub::run(&data_dir, async {
+                let _ = stop_rx.await;
+            })
+            .await
+        }
+    });
+
+    let phone = new_client();
+    let hub_ref = pair(&phone, &data_dir, "phone").await;
+
+    //announced by default
+    let nearby = phone.nearby_hubs(3000).await.unwrap();
+    assert!(nearby.iter().any(|h| h.id == hub_ref.id), "{nearby:?}");
+
+    let mut settings = phone.hub_settings(hub_ref.clone()).await.unwrap();
+    assert!(settings.lan_discovery && settings.share_providers);
+    settings.share_providers = false;
+    settings.lan_discovery = false;
+    let saved = phone
+        .set_hub_settings(hub_ref.clone(), settings.clone())
+        .await
+        .unwrap();
+    assert!(!saved.share_providers);
+    assert!(phone.providers(hub_ref.clone()).await.unwrap().is_empty());
+
+    //a browser has no admin rights
+    let browser = new_client();
+    let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
+    browser
+        .pair(link, "browser".into(), "web".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        browser.hub_settings(hub_ref.clone()).await,
+        Err(HubError::Unauthorized)
+    ));
+
+    stop_tx.send(()).unwrap();
+    hub.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}

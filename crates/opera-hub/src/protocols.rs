@@ -168,9 +168,16 @@ impl Protocol for Session {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Admin {
     pub data_dir: std::path::PathBuf,
+    pub settings: Arc<crate::settings::Settings>,
+}
+
+impl std::fmt::Debug for Admin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Admin")
+    }
 }
 
 impl Protocol for Admin {
@@ -190,6 +197,18 @@ impl Protocol for Admin {
                             code: invite.code,
                             link: invite.link.to_string(),
                         }
+                    }
+                    Err(e) => AdminResponse::Error {
+                        message: format!("{e:#}"),
+                    },
+                },
+                AdminRequest::Settings => AdminResponse::Settings {
+                    settings: self.settings.get(),
+                },
+                AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
+                    Ok(()) => {
+                        info!("{} changed the hub settings", peer.short());
+                        AdminResponse::Settings { settings }
                     }
                     Err(e) => AdminResponse::Error {
                         message: format!("{e:#}"),

@@ -26,6 +26,7 @@ getrandom = "0.4"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+mdns-sd = "0.21"
 tokio = { version = "1.53.2", features = ["net", "rt-multi-thread", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 uniffi = { version = "0.32", features = ["tokio"] }

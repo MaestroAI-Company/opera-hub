@@ -1,4 +1,6 @@
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+mod lan;
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod proxy;
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 mod web;
@@ -10,6 +12,7 @@ use std::time::Duration;
 
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
+use opera_hub_proto::HubSettings as ProtoSettings;
 use opera_hub_proto::invite::{self, INVITE_ALPN, InviteRequest, InviteResponse};
 use opera_hub_proto::{
     ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
@@ -26,6 +29,9 @@ use tokio::sync::{Mutex, OnceCell};
 uniffi::setup_scaffolding!();
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+//long enough for every hub nearby to answer
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+const LAN_BROWSE: Duration = Duration::from_secs(2);
 //codes are typed after the hub published them
 const CODE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -97,6 +103,29 @@ pub struct HubInvite {
     pub code: String,
     //shown as a qr code
     pub link: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSettings {
+    pub lan_discovery: bool,
+    pub share_providers: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct NearbyHub {
+    pub id: String,
+    pub name: String,
+    pub addrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +243,9 @@ pub struct HubClient {
     connections: Mutex<HashMap<(String, &'static [u8]), Connection>>,
     #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     proxy: Mutex<Option<ProxyInfo>>,
+    //addresses found on the local network
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    lan: std::sync::Mutex<HashMap<String, Vec<std::net::SocketAddr>>>,
 }
 
 #[cfg_attr(
@@ -236,6 +268,8 @@ impl HubClient {
             connections: Mutex::new(HashMap::new()),
             #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             proxy: Mutex::new(None),
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+            lan: Default::default(),
         }))
     }
 
@@ -329,7 +363,39 @@ impl HubClient {
         match response {
             AdminResponse::Invite { code, link } => Ok(HubInvite { code, link }),
             AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
+    }
+
+    pub async fn hub_settings(&self, hub: PairedHub) -> Result<HubSettings, HubError> {
+        self.admin(&hub, AdminRequest::Settings).await
+    }
+
+    pub async fn set_hub_settings(
+        &self,
+        hub: PairedHub,
+        settings: HubSettings,
+    ) -> Result<HubSettings, HubError> {
+        let settings = ProtoSettings {
+            lan_discovery: settings.lan_discovery,
+            share_providers: settings.share_providers,
+        };
+        self.admin(&hub, AdminRequest::SetSettings { settings })
+            .await
+    }
+
+    //hubs announcing themselves on this network
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    pub async fn nearby_hubs(&self, wait_ms: u64) -> Result<Vec<NearbyHub>, HubError> {
+        let found = self.browse_lan(Duration::from_millis(wait_ms)).await?;
+        Ok(found
+            .into_iter()
+            .map(|hub| NearbyHub {
+                id: hub.id,
+                name: hub.name,
+                addrs: hub.addrs.iter().map(|a| a.to_string()).collect(),
+            })
+            .collect())
     }
 
     pub async fn status(&self, hub: PairedHub) -> Result<HubStatus, HubError> {
@@ -590,7 +656,15 @@ impl HubClient {
                 match connections.get(&key) {
                     Some(conn) if conn.close_reason().is_none() => conn.clone(),
                     _ => {
-                        let conn = self.connect(paired_addr(hub)?, alpn).await?;
+                        let conn = match self.connect(self.with_lan(paired_addr(hub)?), alpn).await
+                        {
+                            Ok(conn) => conn,
+                            //offline networks still reach a hub nearby
+                            Err(HubError::Unreachable(_)) if self.found_on_lan(&hub.id).await => {
+                                self.connect(self.with_lan(paired_addr(hub)?), alpn).await?
+                            }
+                            Err(e) => return Err(e),
+                        };
                         connections.insert(key.clone(), conn.clone());
                         conn
                     }
@@ -631,6 +705,64 @@ impl HubClient {
             ProvidersResponse::Error { message } => Ok(Forwarded::Refused(message)),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
+    }
+
+    async fn admin<T>(&self, hub: &PairedHub, request: AdminRequest) -> Result<T, HubError>
+    where
+        T: From<ProtoSettings>,
+    {
+        let mut stream = self.stream(hub, ADMIN_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            AdminResponse::Settings { settings } => Ok(settings.into()),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    fn with_lan(&self, addr: EndpointAddr) -> EndpointAddr {
+        let known = self
+            .lan
+            .lock()
+            .ok()
+            .and_then(|lan| lan.get(&addr.id.to_string()).cloned());
+        known
+            .unwrap_or_default()
+            .into_iter()
+            .fold(addr, |addr, ip| addr.with_ip_addr(ip))
+    }
+
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    fn with_lan(&self, addr: EndpointAddr) -> EndpointAddr {
+        addr
+    }
+
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    async fn browse_lan(&self, wait: Duration) -> Result<Vec<lan::Found>, HubError> {
+        let found = tokio::task::spawn_blocking(move || lan::browse(wait))
+            .await
+            .map_err(|e| HubError::Internal(e.to_string()))?
+            .map_err(HubError::Internal)?;
+        if let Ok(mut known) = self.lan.lock() {
+            for hub in &found {
+                known.insert(hub.id.clone(), hub.addrs.clone());
+            }
+        }
+        Ok(found)
+    }
+
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    async fn found_on_lan(&self, id: &str) -> bool {
+        self.browse_lan(LAN_BROWSE)
+            .await
+            .is_ok_and(|found| found.iter().any(|hub| hub.id == id))
+    }
+
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    async fn found_on_lan(&self, _id: &str) -> bool {
+        false
     }
 
     async fn data(&self, hub: &PairedHub, request: SyncRequest) -> Result<SyncResponse, HubError> {
@@ -738,6 +870,15 @@ async fn derive_code(code: String) -> Result<invite::InviteKeys, HubError> {
     #[cfg(all(target_family = "wasm", target_os = "unknown"))]
     {
         invite::derive(&code).map_err(invalid)
+    }
+}
+
+impl From<ProtoSettings> for HubSettings {
+    fn from(settings: ProtoSettings) -> Self {
+        Self {
+            lan_discovery: settings.lan_discovery,
+            share_providers: settings.share_providers,
+        }
     }
 }
 

@@ -51,10 +51,17 @@ pub fn default_targets() -> Vec<Target> {
     ]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Providers {
     pub http: reqwest::Client,
     pub targets: Arc<Vec<Target>>,
+    pub settings: Arc<crate::settings::Settings>,
+}
+
+impl std::fmt::Debug for Providers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Providers")
+    }
 }
 
 impl Protocol for Providers {
@@ -92,6 +99,9 @@ impl Protocol for Providers {
 impl Providers {
     async fn detect(&self) -> Vec<ProviderInfo> {
         let mut found = Vec::new();
+        if !self.settings.get().share_providers {
+            return found;
+        }
         for target in self.targets.iter() {
             let probe = self
                 .http
@@ -113,6 +123,9 @@ impl Providers {
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
     {
+        if !self.settings.get().share_providers {
+            bail!("this hub does not share its providers");
+        }
         let target = self
             .targets
             .iter()

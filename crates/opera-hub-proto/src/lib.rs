@@ -26,6 +26,9 @@ pub const SECRET_COLLECTIONS: [&str; 2] = [COLLECTION_PROVIDERS, COLLECTION_ACCO
 //everyday data under the sync scope
 pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 
+//mdns service hubs announce on the local network
+pub const LAN_SERVICE: &str = "_opera-hub._udp.local.";
+
 //close code for unknown devices or missing scopes
 pub const UNAUTHORIZED: u32 = 401;
 
@@ -87,12 +90,34 @@ pub enum HubResponse {
 pub enum AdminRequest {
     //a pairing code and link for a new device
     Invite,
+    Settings,
+    SetSettings { settings: HubSettings },
+}
+
+//hub wide toggles, admins change them
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HubSettings {
+    //visible to devices on the same network
+    pub lan_discovery: bool,
+    //paired devices may use this machine's providers
+    pub share_providers: bool,
+}
+
+impl Default for HubSettings {
+    fn default() -> Self {
+        Self {
+            lan_discovery: true,
+            share_providers: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdminResponse {
     Invite { code: String, link: String },
+    Settings { settings: HubSettings },
     Error { message: String },
 }
 
