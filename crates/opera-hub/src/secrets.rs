@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use opera_hub_proto::{
-    AccessToken, COLLECTION_PROVIDERS, SCOPE_SECRETS, SecretsRequest, SecretsResponse, read_frame,
+    AccessToken, SCOPE_SECRETS, SECRET_COLLECTIONS, SecretsRequest, SecretsResponse, read_frame,
     write_frame,
 };
 use serde::Deserialize;
@@ -162,7 +162,7 @@ struct TokenResponse {
 }
 
 fn check_collection(collection: &str) -> Result<()> {
-    if collection != COLLECTION_PROVIDERS {
+    if !SECRET_COLLECTIONS.contains(&collection) {
         bail!("unknown collection {collection}");
     }
     Ok(())

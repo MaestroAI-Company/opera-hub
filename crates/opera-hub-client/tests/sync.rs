@@ -95,6 +95,25 @@ async fn data_sync_and_watch() {
         .unwrap();
     assert_eq!(page.records[0].payload.as_deref(), Some(image.as_str()));
 
+    //the cloud account rides the secrets scope
+    phone
+        .push(
+            hub_ref.clone(),
+            "accounts".into(),
+            vec![record("cloud", 5, r#"{"provider":"nextcloud"}"#.into())],
+        )
+        .await
+        .unwrap();
+    let page = laptop
+        .pull(hub_ref.clone(), "accounts".into(), 0)
+        .await
+        .unwrap();
+    assert_eq!(page.records[0].id, "cloud");
+
+    //the hub lists the same id
+    let devices = laptop.devices(hub_ref.clone()).await.unwrap();
+    assert!(devices.iter().any(|d| d.id == phone.device_id()));
+
     let unknown = laptop.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");
 

@@ -7,7 +7,7 @@ use iroh::{RelayMode, RelayUrl, SecretKey};
 use serde::Deserialize;
 
 const CONFIG_FILE: &str = "config.toml";
-const SECRET_KEY_FILE: &str = "secret.key";
+pub const SECRET_KEY_FILE: &str = "secret.key";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]

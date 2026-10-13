@@ -18,6 +18,9 @@ pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
+//cloud backup account with its credentials
+pub const COLLECTION_ACCOUNTS: &str = "accounts";
+pub const SECRET_COLLECTIONS: [&str; 2] = [COLLECTION_PROVIDERS, COLLECTION_ACCOUNTS];
 //everyday data under the sync scope
 pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 
@@ -32,6 +35,7 @@ pub const SCOPE_ADMIN: &str = "admin";
 
 pub const KIND_PHONE: &str = "phone";
 pub const KIND_DESKTOP: &str = "desktop";
+pub const KIND_WEB: &str = "web";
 
 //images travel as blob records
 const MAX_FRAME_BYTES: u32 = 32 * 1024 * 1024;

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
@@ -47,6 +47,45 @@ pub async fn run_with_targets(
     shutdown: impl Future<Output = ()>,
     targets: Vec<Target>,
 ) -> Result<()> {
+    let running = start(data_dir, targets).await?;
+    shutdown.await;
+    running.stop().await
+}
+
+//tells an embedding app once it listens
+pub async fn run_notify(
+    data_dir: &Path,
+    started: tokio::sync::oneshot::Sender<Result<()>>,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let running = match start(data_dir, default_targets()).await {
+        Ok(running) => running,
+        Err(e) => {
+            let _ = started.send(Err(anyhow!("{e:#}")));
+            return Err(e);
+        }
+    };
+    let _ = started.send(Ok(()));
+    shutdown.await;
+    running.stop().await
+}
+
+struct Running {
+    router: Router,
+    _lock: std::fs::File,
+}
+
+impl Running {
+    async fn stop(self) -> Result<()> {
+        info!("hub stopping");
+        self.router.shutdown().await?;
+        Ok(())
+    }
+}
+
+async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
+    //held until the hub stops
+    let lock = lock(data_dir)?;
     let config = Config::load(data_dir)?;
     let key = config::load_or_create_key(data_dir)?;
     let endpoint = bind(&config, Some(key), config.port).await?;
@@ -126,10 +165,40 @@ pub async fn run_with_targets(
             ),
         )
         .spawn();
-    shutdown.await;
-    info!("hub stopping");
-    router.shutdown().await?;
-    Ok(())
+    Ok(Running {
+        router,
+        _lock: lock,
+    })
+}
+
+const LOCK_FILE: &str = "hub.lock";
+const LOG_FILE: &str = "hub.log";
+//older lines move to hub.log.old
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
+//two hubs on one data dir would fork the database
+fn lock(data_dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("cannot create {}", data_dir.display()))?;
+    let file = std::fs::File::create(data_dir.join(LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("another hub already runs on {}", data_dir.display())
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+//true while a hub holds the data dir
+pub fn is_running(data_dir: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(data_dir.join(LOCK_FILE))
+    else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 //clients find addresses through lookup
@@ -239,10 +308,14 @@ pub fn init_logging(data_dir: &Path, to_file: bool) -> Result<()> {
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     if to_file {
         std::fs::create_dir_all(data_dir)?;
+        let path = data_dir.join(LOG_FILE);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+            std::fs::rename(&path, path.with_extension("log.old"))?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(data_dir.join("hub.log"))?;
+            .open(&path)?;
         builder
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(file))
@@ -251,4 +324,21 @@ pub fn init_logging(data_dir: &Path, to_file: bool) -> Result<()> {
         builder.with_writer(std::io::stderr).init();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_hub_per_data_dir() {
+        let dir = std::env::temp_dir().join(format!("opera-hub-lock-{}", std::process::id()));
+        assert!(!is_running(&dir));
+        let held = lock(&dir).unwrap();
+        assert!(is_running(&dir));
+        assert!(lock(&dir).is_err());
+        drop(held);
+        assert!(!is_running(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

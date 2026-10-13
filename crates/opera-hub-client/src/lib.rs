@@ -8,12 +8,12 @@ use std::time::Duration;
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use opera_hub_proto::{
-    ADMIN_ALPN, AdminRequest, AdminResponse, COLLECTION_PROVIDERS, HUB_ALPN, HubRequest,
+    ADMIN_ALPN, AdminRequest, AdminResponse, HUB_ALPN, HubRequest,
     HubResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse,
-    PairingLink, ProvidersRequest, ProvidersResponse, Record, SECRETS_ALPN, SYNC_ALPN,
+    PairingLink, ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN,
     SecretsRequest, SecretsResponse, SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, request,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize, Serializer};
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, OnceCell};
 
@@ -43,14 +43,36 @@ pub enum HubError {
     Internal(String),
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+//desktop and web read the code like android
+impl Serialize for HubError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let code = match self {
+            HubError::InvalidLink(_) => "InvalidLink",
+            HubError::PairingRejected => "PairingRejected",
+            HubError::PairingExpired => "PairingExpired",
+            HubError::Unauthorized => "Unauthorized",
+            HubError::Unreachable(_) => "Unreachable",
+            HubError::Outdated => "Outdated",
+            HubError::Internal(_) => "Internal",
+        };
+        let mut error = serializer.serialize_struct("HubError", 2)?;
+        error.serialize_field("code", code)?;
+        error.serialize_field("message", &self.to_string())?;
+        error.end()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct PairedHub {
     pub id: String,
     pub name: String,
     pub relays: Vec<String>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct HubStatus {
     pub name: String,
     pub version: String,
@@ -58,7 +80,8 @@ pub struct HubStatus {
     pub direct: bool,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct HubDevice {
     pub id: String,
     pub name: String,
@@ -69,7 +92,8 @@ pub struct HubDevice {
     pub last_seen: Option<u64>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncRecord {
     pub id: String,
     pub updated_at: u64,
@@ -77,14 +101,16 @@ pub struct SyncRecord {
     pub payload: Option<String>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct PullPage {
     pub records: Vec<SyncRecord>,
     pub cursor: u64,
     pub more: bool,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct McpGrant {
     pub server_id: String,
     pub token_endpoint: String,
@@ -94,20 +120,23 @@ pub struct McpGrant {
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct McpAccessToken {
     pub access_token: String,
     pub expires_at: u64,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct HubProvider {
     pub id: String,
     pub name: String,
     pub kind: String,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
@@ -137,6 +166,11 @@ impl HubClient {
             connections: Mutex::new(HashMap::new()),
             proxy: Mutex::new(None),
         }))
+    }
+
+    //the id the hub lists for this device
+    pub fn device_id(&self) -> String {
+        self.secret_key.public().to_string()
     }
 
     pub async fn pair(
@@ -248,8 +282,8 @@ impl HubClient {
                 payload: r.payload,
             })
             .collect();
-        //provider secrets need their own scope
-        if collection == COLLECTION_PROVIDERS {
+        //provider and account secrets need their own scope
+        if SECRET_COLLECTIONS.contains(&collection.as_str()) {
             let request = SecretsRequest::Push {
                 collection,
                 records,
@@ -275,7 +309,7 @@ impl HubClient {
         collection: String,
         since: u64,
     ) -> Result<PullPage, HubError> {
-        let (records, cursor, more) = if collection == COLLECTION_PROVIDERS {
+        let (records, cursor, more) = if SECRET_COLLECTIONS.contains(&collection.as_str()) {
             match self
                 .secrets(&hub, SecretsRequest::Pull { collection, since })
                 .await?

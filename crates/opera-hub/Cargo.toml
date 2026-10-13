@@ -31,9 +31,19 @@ webpki-roots = "1"
 service-manager = "0.11"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-png = "0.18"
-qrcode = { version = "0.14", default-features = false }
-softbuffer = "0.4"
-sys-locale = "0.3"
-tao = "0.37"
-tray-icon = { version = "0.26", default-features = false }
+png = { version = "0.18", optional = true }
+qrcode = { version = "0.14", default-features = false, optional = true }
+softbuffer = { version = "0.4", optional = true }
+sys-locale = { version = "0.3", optional = true }
+tao = { version = "0.37", optional = true }
+tray-icon = { version = "0.26", default-features = false, optional = true }
+
+[features]
+default = ["tray"]
+# apps embedding the hub skip the tray
+tray = ["dep:png", "dep:qrcode", "dep:softbuffer", "dep:sys-locale", "dep:tao", "dep:tray-icon"]
+
+[[bin]]
+name = "opera-hubw"
+path = "src/bin/opera-hubw/main.rs"
+required-features = ["tray"]

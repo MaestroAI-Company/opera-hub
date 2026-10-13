@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use opera_hub_proto::{
-    DeviceInfo, KIND_DESKTOP, KIND_PHONE, PairRejection, SCOPE_ADMIN, SCOPE_PROVIDERS,
+    DeviceInfo, KIND_DESKTOP, KIND_PHONE, KIND_WEB, PairRejection, SCOPE_ADMIN, SCOPE_PROVIDERS,
     SCOPE_SECRETS, SCOPE_SYNC,
 };
 use serde::de::DeserializeOwned;
@@ -21,6 +21,10 @@ pub type Device = DeviceInfo;
 pub fn default_scopes(kind: &str) -> Vec<String> {
     match kind {
         KIND_PHONE | KIND_DESKTOP => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS, SCOPE_ADMIN]
+            .map(String::from)
+            .to_vec(),
+        //a browser tab never manages the hub
+        KIND_WEB => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS]
             .map(String::from)
             .to_vec(),
         _ => Vec::new(),
