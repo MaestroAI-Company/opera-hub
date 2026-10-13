@@ -227,10 +227,6 @@ async fn hub_settings_and_lan() {
     let phone = new_client();
     let hub_ref = pair(&phone, &data_dir, "phone").await;
 
-    //announced by default
-    let nearby = phone.nearby_hubs(3000).await.unwrap();
-    assert!(nearby.iter().any(|h| h.id == hub_ref.id), "{nearby:?}");
-
     let mut settings = phone.hub_settings(hub_ref.clone()).await.unwrap();
     assert!(settings.lan_discovery && settings.share_providers);
     settings.share_providers = false;
@@ -280,6 +276,33 @@ async fn hub_settings_and_lan() {
         browser.devices(hub_ref.clone()).await,
         Err(HubError::Unauthorized)
     ));
+
+    stop_tx.send(()).unwrap();
+    hub.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+//ci runners often block multicast, run with --ignored
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs multicast on the local network"]
+async fn nearby_hubs_on_lan() {
+    let data_dir = std::env::temp_dir().join(format!("opera-hub-mdns-{}", random_hex::<8>()));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let hub = tokio::spawn({
+        let data_dir = data_dir.clone();
+        async move {
+            opera_hub::hub::run(&data_dir, async {
+                let _ = stop_rx.await;
+            })
+            .await
+        }
+    });
+
+    //announced by default
+    let phone = new_client();
+    let hub_ref = pair(&phone, &data_dir, "phone").await;
+    let nearby = phone.nearby_hubs(3000).await.unwrap();
+    assert!(nearby.iter().any(|h| h.id == hub_ref.id), "{nearby:?}");
 
     stop_tx.send(()).unwrap();
     hub.await.unwrap().unwrap();
