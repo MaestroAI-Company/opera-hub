@@ -369,6 +369,33 @@ impl HubClient {
         }
     }
 
+    //any device renames itself, admins rename others
+    pub async fn rename_device(
+        &self,
+        hub: PairedHub,
+        id: String,
+        name: String,
+    ) -> Result<(), HubError> {
+        if id == self.device_id() {
+            let mut stream = self.stream(&hub, HUB_ALPN).await?;
+            let response = stream.request(&HubRequest::Rename { name }).await?;
+            stream.finish();
+            return match response {
+                HubResponse::Renamed => Ok(()),
+                HubResponse::Error { message } => Err(HubError::Internal(message)),
+                other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+            };
+        }
+        self.admin_devices(&hub, AdminRequest::RenameDevice { id, name })
+            .await
+    }
+
+    //admins only, the device loses access at once
+    pub async fn remove_device(&self, hub: PairedHub, id: String) -> Result<(), HubError> {
+        self.admin_devices(&hub, AdminRequest::RemoveDevice { id })
+            .await
+    }
+
     //the hub installs the release and restarts
     pub async fn update_hub(&self, hub: PairedHub) -> Result<String, HubError> {
         let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
@@ -782,6 +809,17 @@ impl HubClient {
     #[cfg(all(target_family = "wasm", target_os = "unknown"))]
     async fn found_on_lan(&self, _id: &str) -> bool {
         false
+    }
+
+    async fn admin_devices(&self, hub: &PairedHub, request: AdminRequest) -> Result<(), HubError> {
+        let mut stream = self.stream(hub, ADMIN_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            AdminResponse::Devices { .. } => Ok(()),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
     }
 
     async fn data(&self, hub: &PairedHub, request: SyncRequest) -> Result<SyncResponse, HubError> {

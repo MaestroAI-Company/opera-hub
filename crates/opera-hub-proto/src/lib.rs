@@ -26,6 +26,15 @@ pub const SECRET_COLLECTIONS: [&str; 2] = [COLLECTION_PROVIDERS, COLLECTION_ACCO
 //everyday data under the sync scope
 pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 
+//device names shown in every list
+pub const MAX_DEVICE_NAME: usize = 64;
+
+//trimmed and bounded, none when empty
+pub fn clean_device_name(name: &str) -> Option<String> {
+    let name: String = name.trim().chars().take(MAX_DEVICE_NAME).collect();
+    (!name.is_empty()).then_some(name)
+}
+
 //mdns service hubs announce on the local network
 pub const LAN_SERVICE: &str = "_opera-hub._udp.local.";
 
@@ -74,6 +83,8 @@ pub enum HubRequest {
     Unpair,
     //any paired device may read the list
     Devices,
+    //a device may rename itself
+    Rename { name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +100,10 @@ pub enum HubResponse {
     Devices {
         devices: Vec<DeviceInfo>,
     },
+    Renamed,
+    Error {
+        message: String,
+    },
 }
 
 //managing the hub needs the admin scope
@@ -101,6 +116,9 @@ pub enum AdminRequest {
     SetSettings { settings: HubSettings },
     //install the newest release and restart
     Update,
+    RenameDevice { id: String, name: String },
+    //its open connections close at once
+    RemoveDevice { id: String },
 }
 
 //hub wide toggles, admins change them
@@ -128,6 +146,7 @@ pub enum AdminResponse {
     Invite { code: String, link: String },
     Settings { settings: HubSettings },
     Updating { version: String },
+    Devices { devices: Vec<DeviceInfo> },
     Error { message: String },
 }
 

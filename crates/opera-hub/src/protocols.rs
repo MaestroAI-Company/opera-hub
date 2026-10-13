@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use opera_hub_proto::{
     AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, SCOPE_ADMIN,
-    read_frame, write_frame,
+    clean_device_name, read_frame, write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -47,6 +47,17 @@ pub trait Protocol: Clone + Send + Sync + 'static {
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send;
+}
+
+//checked again for every stream, a removed device stops at once
+pub fn still_allowed(store: &Store, peer: &Peer, access: Access) -> Result<bool> {
+    let device = store.device(&peer.id)?;
+    Ok(match (access, &device) {
+        (Access::Public, _) => true,
+        (_, None) => false,
+        (Access::Paired, Some(_)) => true,
+        (Access::Scope(scope), Some(device)) => device.scopes.iter().any(|s| s == scope),
+    })
 }
 
 //deny by default before any serve
@@ -157,6 +168,15 @@ impl Protocol for Session {
                 HubRequest::Devices => HubResponse::Devices {
                     devices: self.store.devices()?,
                 },
+                HubRequest::Rename { name } => match clean_device_name(&name) {
+                    Some(name) => {
+                        self.store.rename_device(&peer.id, &name)?;
+                        HubResponse::Renamed
+                    }
+                    None => HubResponse::Error {
+                        message: "a device needs a name".into(),
+                    },
+                },
                 HubRequest::Unpair => {
                     self.store.remove_device(&peer.id)?;
                     info!("{} unpaired itself", peer.short());
@@ -172,6 +192,7 @@ impl Protocol for Session {
 
 #[derive(Clone)]
 pub struct Admin {
+    pub store: Arc<Store>,
     pub data_dir: std::path::PathBuf,
     pub settings: Arc<crate::settings::Settings>,
     pub http: reqwest::Client,
@@ -220,6 +241,32 @@ impl Protocol for Admin {
                         message: format!("{e:#}"),
                     },
                 },
+                AdminRequest::RenameDevice { id, name } => match clean_device_name(&name) {
+                    Some(name) if self.store.rename_device(&id, &name)? => {
+                        info!("{} renamed a device to {name}", peer.short());
+                        AdminResponse::Devices {
+                            devices: self.store.devices()?,
+                        }
+                    }
+                    Some(_) => AdminResponse::Error {
+                        message: "no such device".into(),
+                    },
+                    None => AdminResponse::Error {
+                        message: "a device needs a name".into(),
+                    },
+                },
+                AdminRequest::RemoveDevice { id } => {
+                    if self.store.remove_device(&id)? {
+                        info!(
+                            "{} removed device {}",
+                            peer.short(),
+                            &id[..id.len().min(10)]
+                        );
+                    }
+                    AdminResponse::Devices {
+                        devices: self.store.devices()?,
+                    }
+                }
                 AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
                     Ok(()) => {
                         info!("{} changed the hub settings", peer.short());

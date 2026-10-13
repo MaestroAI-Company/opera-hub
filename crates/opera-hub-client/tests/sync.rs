@@ -227,6 +227,33 @@ async fn hub_settings_and_lan() {
         Err(HubError::Unauthorized)
     ));
 
+    //it still renames itself, admins rename and remove anyone
+    browser
+        .rename_device(hub_ref.clone(), browser.device_id(), "  my tab  ".into())
+        .await
+        .unwrap();
+    phone
+        .rename_device(hub_ref.clone(), phone.device_id(), "pocket".into())
+        .await
+        .unwrap();
+    let names: Vec<String> = phone
+        .devices(hub_ref.clone())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.contains(&"my tab".to_string()) && names.contains(&"pocket".to_string()));
+    phone
+        .remove_device(hub_ref.clone(), browser.device_id())
+        .await
+        .unwrap();
+    //its open connection is refused on the next request
+    assert!(matches!(
+        browser.devices(hub_ref.clone()).await,
+        Err(HubError::Unauthorized)
+    ));
+
     stop_tx.send(()).unwrap();
     hub.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data_dir);

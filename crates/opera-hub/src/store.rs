@@ -70,6 +70,18 @@ impl Store {
         write_json(&self.dir.join(DEVICES_FILE), &devices)
     }
 
+    //false when no such device
+    pub fn rename_device(&self, id: &str, name: &str) -> Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        let mut devices = self.devices()?;
+        let Some(device) = devices.iter_mut().find(|device| device.id == id) else {
+            return Ok(false);
+        };
+        device.name = name.to_string();
+        write_json(&self.dir.join(DEVICES_FILE), &devices)?;
+        Ok(true)
+    }
+
     pub fn remove_device(&self, id: &str) -> Result<bool> {
         let _guard = self.lock.lock().unwrap();
         let mut devices = self.devices()?;

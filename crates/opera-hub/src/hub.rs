@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::lan;
-use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit};
+use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
 use crate::settings::Settings;
@@ -133,6 +133,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             ADMIN_ALPN,
             OverIroh::new(
                 Admin {
+                    store: store.clone(),
                     data_dir: data_dir.to_path_buf(),
                     settings: settings.clone(),
                     http: http.clone(),
@@ -317,6 +318,10 @@ impl<P: Protocol + std::fmt::Debug> ProtocolHandler for OverIroh<P> {
         }
         //ends when the client closes the connection
         while let Ok((mut send, recv)) = conn.accept_bi().await {
+            if !still_allowed(&self.store, &peer, P::ACCESS).map_err(user_error)? {
+                conn.close(UNAUTHORIZED.into(), b"removed");
+                return Ok(());
+            }
             let protocol = self.protocol.clone();
             let peer = peer.clone();
             tokio::spawn(async move {
