@@ -29,14 +29,28 @@ const SEARCH_LIMIT: &str = "20";
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL: Duration = Duration::from_millis(300);
 
-//official ggml-org builds, smallest first
-const CATALOG: [(&str, &str, &str, &str, u64); 7] = [
+//official builds from the model makers, smallest first
+const CATALOG: [(&str, &str, &str, &str, u64); 12] = [
     (
         "ggml-org/Qwen3.5-0.8B-GGUF",
         "Qwen3.5-0.8B-Q4_0.gguf",
         "Qwen3.5 0.8B",
         "Tiny and fast, fine on any computer",
         563_036_064,
+    ),
+    (
+        "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
+        "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+        "LFM2.5 1.2B",
+        "Very fast small model from Liquid AI, 2 GB of memory",
+        730_895_168,
+    ),
+    (
+        "mistralai/Ministral-3-3B-Instruct-2512-GGUF",
+        "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+        "Ministral 3 3B",
+        "Small model from Mistral AI, 4 GB of memory",
+        2_147_023_008,
     ),
     (
         "ggml-org/gemma-4-E2B-it-GGUF",
@@ -53,11 +67,32 @@ const CATALOG: [(&str, &str, &str, &str, u64); 7] = [
         4_590_000_000,
     ),
     (
+        "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
+        "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+        "Ministral 3 8B",
+        "Balanced model from Mistral AI, 8 GB of memory",
+        5_198_911_904,
+    ),
+    (
+        "ibm-granite/granite-4.2-8b-GGUF",
+        "granite-4.2-8b-Q4_K_M.gguf",
+        "Granite 4.2 8B",
+        "Precise work model from IBM, 8 GB of memory",
+        5_347_917_952,
+    ),
+    (
         "ggml-org/gemma-4-12B-it-GGUF",
         "gemma-4-12B-it-Q4_0.gguf",
         "Gemma 4 12B",
         "Stronger answers, 10 GB of memory",
         7_220_000_000,
+    ),
+    (
+        "mistralai/Ministral-3-14B-Instruct-2512-GGUF",
+        "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+        "Ministral 3 14B",
+        "Strongest small model from Mistral AI, 12 GB of memory",
+        8_239_593_024,
     ),
     (
         "ggml-org/gemma-4-26B-A4B-it-GGUF",
@@ -490,6 +525,8 @@ impl Llama {
             .into_iter()
             .filter(|e| e.kind == "file" && check_file(&e.path).is_ok())
             .filter(|e| !COMPANIONS.iter().any(|p| e.path.starts_with(p)))
+            //some repos suffix the vision projector
+            .filter(|e| !e.path.contains("-mmproj"))
             .filter(|e| !e.path.contains("-of-0"))
             .map(|e| ModelFile {
                 file: e.path,
