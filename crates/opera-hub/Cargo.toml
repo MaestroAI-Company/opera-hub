@@ -50,3 +50,32 @@ tray = ["dep:png", "dep:qrcode", "dep:rfd", "dep:softbuffer", "dep:sys-locale", 
 name = "opera-hubw"
 path = "src/bin/opera-hubw/main.rs"
 required-features = ["tray"]
+
+# installers built by cargo-packager, the bundler from tauri
+[package.metadata.packager]
+product-name = "Opera Hub"
+identifier = "company.maestroai.opera-hub"
+publisher = "Maestro AI"
+authors = ["Maestro AI"]
+description = "The sync hub for Opera devices"
+homepage = "https://github.com/MaestroAI-Company/opera-hub"
+before-packaging-command = "cargo build --release -p opera-hub"
+binaries = [{ path = "opera-hubw", main = true }, { path = "opera-hub", main = false }]
+icons = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/128x128@2x.png", "assets/icons/icon.icns", "assets/icons/icon.ico"]
+
+[package.metadata.packager.nsis]
+# per user, no admin rights
+installer-mode = "currentUser"
+languages = ["English", "French"]
+# the uninstaller offers to delete pairings and data, off by default
+appdata-paths = ["$LOCALAPPDATA/Maestro AI/Opera Hub"]
+# login start, removed again by the uninstaller
+preinstall-section = '''
+Section LoginStart
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OperaHub" '"$INSTDIR\opera-hubw.exe"'
+SectionEnd
+
+Section un.LoginStart
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OperaHub"
+SectionEnd
+'''

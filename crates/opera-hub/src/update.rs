@@ -117,8 +117,10 @@ pub async fn apply(http: &reqwest::Client, version: &str) -> Result<()> {
     #[cfg(windows)]
     {
         let installer = download_installer(http, version).await?;
-        //the installer stops and restarts the hub
-        std::process::Command::new(installer).arg("/S").spawn()?;
+        //silent, it stops the hub then starts it again
+        std::process::Command::new(installer)
+            .args(["/S", "/R"])
+            .spawn()?;
         Ok(())
     }
     #[cfg(not(windows))]

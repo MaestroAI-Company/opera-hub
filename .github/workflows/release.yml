@@ -108,16 +108,24 @@ jobs:
             cp target/release/opera-hubw dist/opera-hubw-macos-aarch64
           fi
 
+      # the tauri bundler, it fetches nsis itself
+      - name: Install cargo-packager
+        if: runner.os != 'Linux'
+        run: cargo install cargo-packager --locked
+
       # per user setup, also what windows hubs update from
-      - name: Build installer
+      - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          choco install nsis -y --no-progress
-          mkdir stage
-          cp target/release/opera-hub.exe target/release/opera-hubw.exe stage/
-          "/c/Program Files (x86)/NSIS/makensis.exe" -DVERSION="${GITHUB_REF_NAME#v}"             -DDIST="$PWD/stage" installer/windows/opera-hub.nsi
-          mv stage/opera-hub-setup-windows-x86_64.exe dist/
+          cargo packager -p opera-hub --release --formats nsis
+          cp target/release/*-setup.exe dist/opera-hub-setup-windows-x86_64.exe
+
+      - name: Build macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          cargo packager -p opera-hub --release --formats dmg
+          cp target/release/*.dmg dist/opera-hub-macos-aarch64.dmg
 
       - uses: actions/upload-artifact@v4
         with:
