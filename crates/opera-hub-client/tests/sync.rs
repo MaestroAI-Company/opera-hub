@@ -98,20 +98,15 @@ async fn data_sync_and_watch() {
         .unwrap();
     assert_eq!(page.records[0].payload.as_deref(), Some(image.as_str()));
 
-    //the cloud account rides the secrets scope
-    phone
+    //cloud accounts no longer sync
+    assert!(phone
         .push(
             hub_ref.clone(),
             "accounts".into(),
             vec![record("cloud", 5, r#"{"provider":"nextcloud"}"#.into())],
         )
         .await
-        .unwrap();
-    let page = laptop
-        .pull(hub_ref.clone(), "accounts".into(), 0)
-        .await
-        .unwrap();
-    assert_eq!(page.records[0].id, "cloud");
+        .is_err());
 
     //the hub lists the same id
     let devices = laptop.devices(hub_ref.clone()).await.unwrap();

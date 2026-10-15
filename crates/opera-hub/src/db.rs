@@ -50,7 +50,8 @@ impl Db {
             CREATE TABLE IF NOT EXISTS grants (
                 server_id TEXT PRIMARY KEY,
                 grant BLOB NOT NULL
-            );",
+            );
+            DELETE FROM records WHERE collection = 'accounts';",
         )?;
         let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| anyhow!("bad data key"))?;
         let latest: u64 =

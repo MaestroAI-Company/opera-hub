@@ -21,9 +21,7 @@ pub const MODELS_ALPN: &[u8] = b"opera/models/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
-//cloud backup account with its credentials
-pub const COLLECTION_ACCOUNTS: &str = "accounts";
-pub const SECRET_COLLECTIONS: [&str; 2] = [COLLECTION_PROVIDERS, COLLECTION_ACCOUNTS];
+pub const SECRET_COLLECTIONS: [&str; 1] = [COLLECTION_PROVIDERS];
 //everyday data under the sync scope
 pub const SYNC_COLLECTIONS: [&str; 4] = ["conversations", "messages", "blobs", "settings"];
 

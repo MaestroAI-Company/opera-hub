@@ -672,7 +672,7 @@ impl HubClient {
                 payload: r.payload,
             })
             .collect();
-        //provider and account secrets need their own scope
+        //provider secrets need their own scope
         if SECRET_COLLECTIONS.contains(&collection.as_str()) {
             let request = SecretsRequest::Push {
                 collection,

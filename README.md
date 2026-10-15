@@ -2,7 +2,7 @@
 
 Opera Hub is a small self-hosted server that keeps your [Opera](https://github.com/MaestroAI-Company/opera) devices in sync. Install it on a computer you own, pair your phone, desktop and browser, and the hub handles the rest:
 
-- **Sync**: conversations, settings, AI providers and cloud accounts move between your devices.
+- **Sync**: conversations, settings and AI providers move between your devices.
 - **Shared AI**: Ollama, LM Studio and llama.cpp running on the hub's computer can be used from every paired device, even outside your home network.
 - **Local models**: the hub can download and run [llama.cpp](https://github.com/ggml-org/llama.cpp) models itself. It picks the GPU backend for you, and you manage it from the Opera app.
 
