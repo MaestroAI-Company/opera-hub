@@ -219,6 +219,9 @@ pub struct HubStatus {
     pub direct: bool,
     //a newer release the hub can install
     pub update: Option<String>,
+    //share of the hub machine, with everything it runs
+    pub cpu: Option<f32>,
+    pub memory: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,11 +614,14 @@ impl HubClient {
                 name,
                 version,
                 update,
+                usage,
             } => Ok(HubStatus {
                 name,
                 version,
                 direct,
                 update,
+                cpu: usage.map(|u| u.cpu),
+                memory: usage.map(|u| u.memory),
             }),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }

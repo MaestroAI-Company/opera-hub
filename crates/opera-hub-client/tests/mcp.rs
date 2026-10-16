@@ -273,6 +273,14 @@ async fn hub_runs_mcp_servers() {
     assert!(echo_status.values.is_empty(), "secrets never leave the hub");
     assert_eq!(echo_status.secrets_set, ["prefix"]);
     assert_eq!(echo_status.tools, ["echo"]);
+    //usage of each server and of the whole hub
+    assert!(echo_status.memory.is_some_and(|m| m > 0), "{echo_status:?}");
+    let hub_status = phone.status(phone_hub.clone()).await.unwrap();
+    assert!(
+        hub_status
+            .memory
+            .is_some_and(|m| m > echo_status.memory.unwrap())
+    );
 
     let phone_proxy = phone.clone().start_proxy(phone_hub.clone()).await.unwrap();
     let browser_proxy = browser.clone().start_proxy(browser_hub).await.unwrap();

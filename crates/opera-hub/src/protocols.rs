@@ -152,6 +152,7 @@ pub struct Session {
     pub store: Arc<Store>,
     pub name: Arc<str>,
     pub latest: tokio::sync::watch::Receiver<Option<String>>,
+    pub usage: Arc<crate::usage::Usage>,
 }
 
 impl Protocol for Session {
@@ -164,11 +165,18 @@ impl Protocol for Session {
     {
         while let Some(request) = read_frame(&mut reader).await? {
             let response = match request {
-                HubRequest::Hello => HubResponse::Hello {
-                    name: self.name.to_string(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                    update: self.latest.borrow().clone(),
-                },
+                HubRequest::Hello => {
+                    let load = self.usage.hub();
+                    HubResponse::Hello {
+                        name: self.name.to_string(),
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        update: self.latest.borrow().clone(),
+                        usage: Some(opera_hub_proto::HubUsage {
+                            cpu: load.cpu,
+                            memory: load.memory,
+                        }),
+                    }
+                }
                 HubRequest::Devices => HubResponse::Devices {
                     devices: self.store.devices()?,
                 },

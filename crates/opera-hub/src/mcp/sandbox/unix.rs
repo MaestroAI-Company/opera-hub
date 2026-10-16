@@ -10,6 +10,10 @@ pub struct Process {
 }
 
 impl Process {
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     pub async fn wait(&mut self) -> Result<Option<i32>> {
         Ok(self.child.wait().await?.code())
     }

@@ -72,6 +72,8 @@ struct Server {
     tools: Mutex<Vec<String>>,
     update: Mutex<Option<String>>,
     task: Mutex<Option<JoinHandle<()>>>,
+    //the running process, for its usage
+    pid: Mutex<Option<u32>>,
 }
 
 impl Server {
@@ -97,6 +99,7 @@ pub struct Mcp {
     runtimes: Arc<Runtimes>,
     servers: Mutex<HashMap<String, Arc<Server>>>,
     updates: Mutex<Option<JoinHandle<()>>>,
+    usage: crate::usage::Usage,
 }
 
 impl std::fmt::Debug for Mcp {
@@ -121,6 +124,7 @@ impl Mcp {
             db,
             servers: Mutex::new(HashMap::new()),
             updates: Mutex::new(None),
+            usage: Default::default(),
         })
     }
 
@@ -326,8 +330,17 @@ impl Mcp {
 
     pub fn status(&self) -> Result<Vec<McpServer>> {
         let servers: Vec<Arc<Server>> = self.servers.lock().unwrap().values().cloned().collect();
+        let pids: Vec<Option<u32>> = servers.iter().map(|s| *s.pid.lock().unwrap()).collect();
+        let roots: Vec<u32> = pids.iter().flatten().copied().collect();
+        let mut loads = self.usage.measure(&roots).into_iter();
         let mut list = Vec::new();
-        for server in servers {
+        for (server, pid) in servers.into_iter().zip(pids) {
+            let usage = pid
+                .and_then(|_| loads.next())
+                .map(|load| opera_hub_proto::HubUsage {
+                    cpu: load.cpu,
+                    memory: load.memory,
+                });
             let spec = server.spec.lock().unwrap().clone();
             let (state, message) = match server.state.lock().unwrap().clone() {
                 State::Installing => ("installing", None),
@@ -346,6 +359,7 @@ impl Mcp {
                 secrets_set: self.db.mcp_secrets(&server.id)?.into_keys().collect(),
                 tools: server.tools.lock().unwrap().clone(),
                 update: server.update.lock().unwrap().clone(),
+                usage,
             });
         }
         list.sort_by(|a, b| a.listing.title.cmp(&b.listing.title));
@@ -504,6 +518,7 @@ impl Mcp {
             tools: Mutex::new(Vec::new()),
             update: Mutex::new(None),
             task: Mutex::new(None),
+            pid: Mutex::new(None),
         });
         self.servers.lock().unwrap().insert(id, server.clone());
         server
@@ -707,6 +722,7 @@ async fn run_once(runtimes: &Runtimes, db: &Db, server: &Arc<Server>) -> Result<
     };
     let mut child = sandbox::spawn(&launch.program, &args, &env, &home, &policy)
         .context("cannot start the server")?;
+    *server.pid.lock().unwrap() = child.id();
 
     let stderr = child.stderr.take().context("no stderr")?;
     tokio::spawn(keep_log(stderr, server.clone()));
@@ -725,7 +741,9 @@ async fn run_once(runtimes: &Runtimes, db: &Db, server: &Arc<Server>) -> Result<
     *server.bridge.lock().unwrap() = Some(bridge);
     *server.state.lock().unwrap() = State::Running;
     info!("mcp server {} running", spec.listing.title);
-    child.wait().await
+    let status = child.wait().await;
+    *server.pid.lock().unwrap() = None;
+    status
 }
 
 //stderr goes to the log and the tail

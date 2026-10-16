@@ -136,6 +136,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                     store: store.clone(),
                     name,
                     latest: latest.clone(),
+                    usage: Default::default(),
                 },
                 &store,
             ),

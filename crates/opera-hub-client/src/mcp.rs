@@ -97,6 +97,8 @@ pub struct McpServer {
     pub secrets_set: Vec<String>,
     pub tools: Vec<String>,
     pub update: Option<String>,
+    pub cpu: Option<f32>,
+    pub memory: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -239,6 +241,8 @@ impl From<proto::McpServer> for McpServer {
             secrets_set: server.secrets_set,
             tools: server.tools,
             update: server.update,
+            cpu: server.usage.map(|u| u.cpu),
+            memory: server.usage.map(|u| u.memory),
         }
     }
 }

@@ -51,6 +51,10 @@ pub struct Child {
 }
 
 impl Child {
+    pub fn id(&self) -> Option<u32> {
+        self.process.id()
+    }
+
     //exit code, none when killed by a signal
     pub async fn wait(&mut self) -> Result<Option<i32>> {
         self.process.wait().await

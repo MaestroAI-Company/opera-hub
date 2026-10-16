@@ -108,6 +108,9 @@ pub enum HubResponse {
         version: String,
         //a newer release the hub can install
         update: Option<String>,
+        //the hub with everything it runs
+        #[serde(default)]
+        usage: Option<HubUsage>,
     },
     Unpaired,
     Devices {
@@ -132,6 +135,13 @@ pub enum AdminRequest {
     RenameDevice { id: String, name: String },
     //its open connections close at once
     RemoveDevice { id: String },
+}
+
+//cpu share of the machine, memory in bytes
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HubUsage {
+    pub cpu: f32,
+    pub memory: u64,
 }
 
 //hub wide toggles, admins change them
@@ -362,6 +372,9 @@ pub struct McpServer {
     pub secrets_set: Vec<String>,
     pub tools: Vec<String>,
     pub update: Option<String>,
+    //the server with its child processes
+    #[serde(default)]
+    pub usage: Option<HubUsage>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
