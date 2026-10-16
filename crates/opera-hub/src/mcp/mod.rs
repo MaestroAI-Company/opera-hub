@@ -2,11 +2,11 @@
 mod bridge;
 mod mcpb;
 mod runtime;
+pub mod sandbox;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use tracing::{info, warn};
 pub use bridge::Bridge;
 use mcpb::Manifest;
 use runtime::{Runtimes, scrubbed_env};
+use sandbox::Policy;
 
 use crate::llama::hex_sha256;
 
@@ -142,6 +143,7 @@ impl Mcp {
         let entry = self.servers.lock().unwrap().remove(id);
         let (server, task) = entry.ok_or_else(|| anyhow!("no mcp server {id}"))?;
         task.abort();
+        sandbox::forget(&container_name(&server.dir));
         //windows keeps files locked until the child exits
         for _ in 0..20 {
             if std::fs::remove_dir_all(&server.dir).is_ok() || !server.dir.exists() {
@@ -283,33 +285,58 @@ impl Mcp {
                 version,
             } => {
                 self.runtimes.ensure_node().await?;
-                let mut command = Command::new(self.runtimes.node_exe());
-                command
-                    .arg(self.runtimes.npm_cli())
-                    .args(["install", "--prefix"])
-                    .arg(&package)
-                    .args(["--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"])
-                    .args(["--loglevel=error", &format!("{name}@{version}")])
-                    .env("npm_config_cache", self.runtimes.npm_cache())
-                    .env("npm_config_update_notifier", "false");
-                run_tool(command, &home, &self.node_path()).await?;
+                let args: Vec<OsString> = vec![
+                    self.runtimes.npm_cli().into(),
+                    "install".into(),
+                    "--prefix".into(),
+                    package.clone().into(),
+                    "--ignore-scripts".into(),
+                    "--no-audit".into(),
+                    "--no-fund".into(),
+                    "--omit=dev".into(),
+                    "--loglevel=error".into(),
+                    format!("{name}@{version}").into(),
+                ];
+                let env = vec![
+                    ("npm_config_cache".into(), home.join(".npm").into()),
+                    ("npm_config_update_notifier".into(), "false".into()),
+                ];
+                run_install(
+                    &self.runtimes.node_exe(),
+                    &args,
+                    env,
+                    &home,
+                    &self.node_path(),
+                )
+                .await?;
                 npm_entry(&package, name)?;
             }
             Source::Pypi {
                 package: name,
                 version,
             } => {
-                self.runtimes.ensure_uv().await?;
+                let python = self.runtimes.python().await?;
                 let venv = package.join("venv");
-                let mut command = Command::new(self.runtimes.uv_exe());
-                command.arg("venv").arg(&venv).envs(self.runtimes.uv_env());
-                run_tool(command, &home, &[]).await?;
-                let mut command = Command::new(self.runtimes.uv_exe());
-                command
-                    .args(["pip", "install", &format!("{name}=={version}")])
-                    .env("VIRTUAL_ENV", &venv)
-                    .envs(self.runtimes.uv_env());
-                run_tool(command, &home, &[]).await?;
+                let mut env = self.runtimes.uv_env();
+                env.push(("UV_CACHE_DIR".into(), home.join(".cache").join("uv").into()));
+                env.push(("UV_PYTHON_DOWNLOADS".into(), "never".into()));
+                let uv = self.runtimes.uv_exe();
+                let args: Vec<OsString> = vec![
+                    "venv".into(),
+                    venv.clone().into(),
+                    "--python".into(),
+                    python.into(),
+                ];
+                run_install(&uv, &args, env.clone(), &home, &[]).await?;
+                env.push(("VIRTUAL_ENV".into(), venv.clone().into()));
+                let args: Vec<OsString> = vec![
+                    "pip".into(),
+                    "install".into(),
+                    //wheels only, no build script runs
+                    "--no-build".into(),
+                    format!("{name}=={version}").into(),
+                ];
+                run_install(&uv, &args, env, &home, &[]).await?;
                 python_entry(&venv, name)?;
             }
         }
@@ -324,6 +351,15 @@ impl Mcp {
             .into_iter()
             .collect()
     }
+}
+
+//one app container per server folder
+fn container_name(dir: &Path) -> String {
+    let id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("OperaHub.mcp.{id}")
 }
 
 fn read_spec(dir: &Path) -> Result<Spec> {
@@ -348,7 +384,8 @@ async fn supervise(runtimes: Arc<Runtimes>, server: Arc<Server>) {
     loop {
         *server.state.lock().unwrap() = State::Starting;
         let error = match run_once(&runtimes, &server).await {
-            Ok(status) => format!("exited with {status}"),
+            Ok(Some(code)) => format!("exited with code {code}"),
+            Ok(None) => "killed".to_string(),
             Err(e) => format!("{e:#}"),
         };
         *server.bridge.lock().unwrap() = None;
@@ -366,25 +403,22 @@ async fn supervise(runtimes: Arc<Runtimes>, server: Arc<Server>) {
     }
 }
 
-async fn run_once(runtimes: &Runtimes, server: &Arc<Server>) -> Result<std::process::ExitStatus> {
+async fn run_once(runtimes: &Runtimes, server: &Arc<Server>) -> Result<Option<i32>> {
     let package = server.dir.join("package");
     let home = server.dir.join("home");
     let (program, args, extra, path) = launch(runtimes, &server.spec, &package, &home).await?;
     let mut env = scrubbed_env(&home, &path)?;
     env.extend(extra);
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .env_clear()
-        .envs(env)
-        .current_dir(&home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let mut child = command.spawn().context("cannot start the server")?;
+    let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+    //runs only its package, writes only its home
+    let policy = Policy {
+        name: container_name(&server.dir),
+        shared: vec![runtimes.dir().to_path_buf()],
+        read: vec![package],
+        write: vec![home.clone()],
+    };
+    let mut child =
+        sandbox::spawn(&program, &args, &env, &home, &policy).context("cannot start the server")?;
 
     let stderr = child.stderr.take().context("no stderr")?;
     tokio::spawn(keep_log(stderr, server.clone()));
@@ -394,7 +428,7 @@ async fn run_once(runtimes: &Runtimes, server: &Arc<Server>) -> Result<std::proc
     *server.bridge.lock().unwrap() = Some(bridge);
     *server.state.lock().unwrap() = State::Running;
     info!("mcp server {} running", server.spec.name);
-    Ok(child.wait().await?)
+    child.wait().await
 }
 
 //program, args, env and path for one start
@@ -413,7 +447,8 @@ async fn launch(
         Source::Npm { package: name, .. } => {
             runtimes.ensure_node().await?;
             let node = runtimes.node_exe();
-            let mut args = vec![npm_entry(package, name)?.to_string_lossy().into_owned()];
+            let mut args = runtimes.node_flags()?;
+            args.push(npm_entry(package, name)?.to_string_lossy().into_owned());
             args.extend(spec.args.iter().cloned());
             let path = node.parent().map(Path::to_path_buf).into_iter().collect();
             Ok((node, args, Vec::new(), path))
@@ -427,12 +462,22 @@ async fn launch(
         Source::Mcpb { .. } => {
             let manifest = Manifest::read(package)?;
             let launch = manifest.launch(package, home, &spec.config)?;
+            let mut args = launch.args;
             let program = match launch.command.as_str() {
                 "node" => {
                     runtimes.ensure_node().await?;
+                    args.splice(0..0, runtimes.node_flags()?);
+                    //manifests write paths with slashes
+                    if cfg!(windows) {
+                        for arg in &mut args {
+                            if Path::new(arg.as_str()).is_absolute() {
+                                *arg = arg.replace('/', "\\");
+                            }
+                        }
+                    }
                     runtimes.node_exe()
                 }
-                "python" | "python3" => managed_python(runtimes, home).await?,
+                "python" | "python3" => runtimes.python().await?,
                 other => inside(package, Path::new(other))?,
             };
             let env = launch
@@ -445,23 +490,9 @@ async fn launch(
                 .map(Path::to_path_buf)
                 .into_iter()
                 .collect();
-            Ok((program, launch.args, env, path))
+            Ok((program, args, env, path))
         }
     }
-}
-
-async fn managed_python(runtimes: &Runtimes, home: &Path) -> Result<PathBuf> {
-    runtimes.ensure_uv().await?;
-    let mut install = Command::new(runtimes.uv_exe());
-    install.args(["python", "install"]).envs(runtimes.uv_env());
-    run_tool(install, home, &[]).await?;
-    let found = Command::new(runtimes.uv_exe())
-        .args(["python", "find"])
-        .envs(runtimes.uv_env())
-        .output()
-        .await?;
-    ensure!(found.status.success(), "no managed python found");
-    Ok(PathBuf::from(String::from_utf8(found.stdout)?.trim()))
 }
 
 //bundled programs never leave the package
@@ -502,7 +533,8 @@ fn npm_entry(package: &Path, name: &str) -> Result<PathBuf> {
             .all(|c| matches!(c, Component::Normal(_) | Component::CurDir)),
         "{name} points its command outside the package"
     );
-    Ok(root.join(bin))
+    //one separator style, scripts compare it to their own url
+    Ok(bin.components().fold(root, |path, part| path.join(part)))
 }
 
 //the console script a python package declares
@@ -554,37 +586,43 @@ fn site_packages(venv: &Path) -> Option<PathBuf> {
         .find(|p| p.is_dir())
 }
 
-//installers run with the same scrubbed env
-async fn run_tool(mut command: Command, home: &Path, path: &[PathBuf]) -> Result<()> {
-    let base = scrubbed_env(home, path)?;
-    let mut env: Vec<(OsString, OsString)> = base;
-    for (key, value) in command.as_std().get_envs() {
-        if let Some(value) = value {
-            env.push((key.to_os_string(), value.to_os_string()));
-        }
-    }
+//installers run no package code, so outside the sandbox
+async fn run_install(
+    program: &Path,
+    args: &[OsString],
+    extra: Vec<(OsString, OsString)>,
+    home: &Path,
+    path: &[PathBuf],
+) -> Result<()> {
+    let mut env = scrubbed_env(home, path)?;
+    env.extend(extra);
+    let mut command = Command::new(program);
     command
+        .args(args)
         .env_clear()
         .envs(env)
         .current_dir(home)
-        .stdin(Stdio::null())
+        .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
     let output = command.output().await.context("cannot run the installer")?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last: Vec<&str> = stderr.lines().rev().take(8).collect();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        let last: Vec<&str> = errors.lines().rev().take(8).collect();
         bail!(
             "install failed: {}",
-            last.into_iter().rev().collect::<Vec<_>>().join("\n")
+            last.into_iter().rev().collect::<Vec<_>>().join(
+                "
+"
+            )
         );
     }
     Ok(())
 }
 
 //stderr goes to the log and the tail
-async fn keep_log(stderr: tokio::process::ChildStderr, server: Arc<Server>) {
+async fn keep_log(stderr: sandbox::Reader, server: Arc<Server>) {
     let file = server.dir.join(LOG_FILE);
     if std::fs::metadata(&file).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
         let _ = std::fs::rename(&file, file.with_extension("log.old"));

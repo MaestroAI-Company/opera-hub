@@ -12,6 +12,13 @@ const NODE_VERSION: &str = "v24.22.0";
 const NODE_DIST: &str = "https://nodejs.org/dist";
 const UV_VERSION: &str = "0.13.1";
 const UV_RELEASES: &str = "https://github.com/astral-sh/uv/releases/download";
+//js realpath stats every parent folder, which app containers refuse
+const NODE_PRELOAD: &str = r#"const fs = require("fs");
+const { realpathSync, realpath } = fs;
+fs.realpathSync = Object.assign((p, o) => realpathSync.native(p, o), { native: realpathSync.native });
+fs.realpath = Object.assign((p, o, cb) => realpath.native(p, o, cb), { native: realpath.native });
+require("module").syncBuiltinESMExports();
+"#;
 
 pub struct Runtimes {
     dir: PathBuf,
@@ -46,6 +53,24 @@ impl Runtimes {
         }
     }
 
+    //flags every sandboxed node server starts with
+    pub fn node_flags(&self) -> Result<Vec<String>> {
+        //sandboxes cannot stat parent folders
+        let mut flags = vec![
+            "--preserve-symlinks".to_string(),
+            "--preserve-symlinks-main".to_string(),
+        ];
+        if cfg!(windows) {
+            let preload = self.dir.join("node-preload.cjs");
+            if std::fs::read_to_string(&preload).ok().as_deref() != Some(NODE_PRELOAD) {
+                std::fs::write(&preload, NODE_PRELOAD)?;
+            }
+            flags.push("--require".into());
+            flags.push(preload.to_string_lossy().into_owned());
+        }
+        Ok(flags)
+    }
+
     pub fn npm_cli(&self) -> PathBuf {
         let root = self.node_root();
         let modules = if cfg!(windows) {
@@ -61,21 +86,47 @@ impl Runtimes {
             .join(if cfg!(windows) { "uv.exe" } else { "uv" })
     }
 
-    pub fn npm_cache(&self) -> PathBuf {
-        self.dir.join("npm-cache")
+    //every server may read it, none may write
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
-    //uv keeps python and its cache next to itself
+    //uv keeps its python next to itself
     pub fn uv_env(&self) -> Vec<(OsString, OsString)> {
         vec![
             (
                 "UV_PYTHON_INSTALL_DIR".into(),
                 self.dir.join("python").into(),
             ),
-            ("UV_CACHE_DIR".into(), self.dir.join("uv-cache").into()),
             ("UV_PYTHON_PREFERENCE".into(), "only-managed".into()),
             ("UV_NO_CONFIG".into(), "1".into()),
         ]
+    }
+
+    //installed by the hub, outside any sandbox
+    pub async fn python(&self) -> Result<PathBuf> {
+        self.ensure_uv().await?;
+        let _one = self.installing.lock().await;
+        let uv = |args: &[&str]| {
+            let mut command = tokio::process::Command::new(self.uv_exe());
+            command
+                .args(args)
+                .envs(self.uv_env())
+                .env("UV_CACHE_DIR", self.dir.join("uv-cache"))
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            command.creation_flags(0x0800_0000);
+            command
+        };
+        let installed = uv(&["python", "install"]).output().await?;
+        ensure!(
+            installed.status.success(),
+            "cannot install python: {}",
+            String::from_utf8_lossy(&installed.stderr).trim()
+        );
+        let found = uv(&["python", "find"]).output().await?;
+        ensure!(found.status.success(), "no managed python found");
+        Ok(PathBuf::from(String::from_utf8(found.stdout)?.trim()))
     }
 
     pub async fn ensure_node(&self) -> Result<()> {
