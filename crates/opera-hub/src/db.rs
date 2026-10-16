@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -50,6 +51,10 @@ impl Db {
             CREATE TABLE IF NOT EXISTS grants (
                 server_id TEXT PRIMARY KEY,
                 grant BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mcp_secrets (
+                server TEXT PRIMARY KEY,
+                secrets BLOB NOT NULL
             );
             DELETE FROM records WHERE collection = 'accounts';",
         )?;
@@ -194,6 +199,43 @@ impl Db {
             "DELETE FROM grants WHERE server_id = ?1",
             params![server_id],
         )?;
+        Ok(())
+    }
+
+    //secret config of a hosted mcp server
+    pub fn put_mcp_secrets(&self, server: &str, secrets: &BTreeMap<String, String>) -> Result<()> {
+        let sealed = self.seal(&aad("mcp_secrets", server), &serde_json::to_vec(secrets)?)?;
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO mcp_secrets (server, secrets) VALUES (?1, ?2)",
+            params![server, sealed],
+        )?;
+        Ok(())
+    }
+
+    pub fn mcp_secrets(&self, server: &str) -> Result<BTreeMap<String, String>> {
+        let sealed: Option<Vec<u8>> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT secrets FROM mcp_secrets WHERE server = ?1",
+                params![server],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match sealed {
+            Some(sealed) => Ok(serde_json::from_slice(
+                &self.unseal(&aad("mcp_secrets", server), &sealed)?,
+            )?),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    pub fn drop_mcp_secrets(&self, server: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM mcp_secrets WHERE server = ?1", params![server])?;
         Ok(())
     }
 

@@ -1,3 +1,5 @@
+mod mcp;
+pub use mcp::*;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod lan;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]

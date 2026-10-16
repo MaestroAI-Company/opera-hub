@@ -1,84 +1,102 @@
 //mcp servers the hub installs, runs and shares
 mod bridge;
+mod catalog;
+mod install;
 mod mcpb;
+mod protocol;
 mod runtime;
 pub mod sandbox;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use opera_hub_proto::{ForwardHead, ProviderInfo, ProvidersResponse, write_frame};
+use anyhow::{Context, Result, anyhow, ensure};
+use opera_hub_proto::{
+    ForwardHead, McpListing, McpServer, McpSource, ProviderInfo, ProvidersResponse, write_frame,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 pub use bridge::Bridge;
-use mcpb::Manifest;
+pub use catalog::OFFICIAL_REGISTRY;
+pub use protocol::McpAdmin;
 use runtime::{Runtimes, scrubbed_env};
 use sandbox::Policy;
 
-use crate::llama::hex_sha256;
+use crate::db::Db;
 
 //providers ids of hosted servers
 pub const PROVIDER_PREFIX: &str = "mcp-";
 const SPEC_FILE: &str = "server.json";
+const REGISTRIES_FILE: &str = "registries.json";
 const LOG_FILE: &str = "server.log";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-const TAIL_LINES: usize = 500;
+const TAIL_LINES: usize = 200;
 const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
 //a server crashing this often stays down
 const MAX_CRASHES: usize = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Source {
-    Mcpb { url: String, sha256: String },
-    Npm { package: String, version: String },
-    Pypi { package: String, version: String },
-}
-
+//what server.json keeps, secrets live in the database
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Spec {
-    pub name: String,
-    pub source: Source,
+    pub listing: McpListing,
     #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub config: BTreeMap<String, String>,
+    pub values: BTreeMap<String, String>,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum State {
+enum State {
+    Installing,
     Starting,
     Running,
     Failed(String),
+    Stopped,
 }
 
 struct Server {
     id: String,
     dir: PathBuf,
-    spec: Spec,
+    spec: Mutex<Spec>,
     state: Mutex<State>,
     bridge: Mutex<Option<Arc<Bridge>>>,
     tail: Mutex<VecDeque<String>>,
+    tools: Mutex<Vec<String>>,
+    update: Mutex<Option<String>>,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
-//a server and the task keeping it alive
-type Supervised = (Arc<Server>, JoinHandle<()>);
+impl Server {
+    fn stop(&self) {
+        //kill on drop ends the child
+        if let Some(task) = self.task.lock().unwrap().take() {
+            task.abort();
+        }
+        *self.bridge.lock().unwrap() = None;
+        *self.state.lock().unwrap() = State::Stopped;
+    }
+
+    fn title(&self) -> String {
+        self.spec.lock().unwrap().listing.title.clone()
+    }
+}
 
 pub struct Mcp {
     dir: PathBuf,
+    data_dir: PathBuf,
     http: reqwest::Client,
+    db: Arc<Db>,
     runtimes: Arc<Runtimes>,
-    servers: Mutex<HashMap<String, Supervised>>,
+    servers: Mutex<HashMap<String, Arc<Server>>>,
+    updates: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for Mcp {
@@ -94,56 +112,207 @@ impl Drop for Mcp {
 }
 
 impl Mcp {
-    pub fn new(data_dir: &Path, http: reqwest::Client) -> Arc<Self> {
+    pub fn new(data_dir: &Path, http: reqwest::Client, db: Arc<Db>) -> Arc<Self> {
         Arc::new(Self {
             dir: data_dir.join("mcp"),
+            data_dir: data_dir.to_path_buf(),
             runtimes: Arc::new(Runtimes::new(data_dir, http.clone())),
             http,
+            db,
             servers: Mutex::new(HashMap::new()),
+            updates: Mutex::new(None),
         })
     }
 
     //servers installed earlier start with the hub
-    pub fn start_installed(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let id = entry.file_name().to_string_lossy().into_owned();
-            match read_spec(&entry.path()) {
-                Ok(spec) => self.spawn(id, spec),
-                Err(e) => warn!("mcp server {id} skipped: {e:#}"),
+    pub fn start_installed(self: &Arc<Self>) {
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+                let id = entry.file_name().to_string_lossy().into_owned();
+                if id.starts_with('.') {
+                    continue;
+                }
+                match read_spec(&entry.path()) {
+                    Ok(spec) => self.add(id, spec),
+                    Err(e) => warn!("mcp server {id} skipped: {e:#}"),
+                }
             }
         }
+        let weak = Arc::downgrade(self);
+        *self.updates.lock().unwrap() = Some(tokio::spawn(watch_updates(weak)));
     }
 
     pub fn stop_all(&self) {
-        for (_, (_, task)) in self.servers.lock().unwrap().drain() {
-            //kill on drop ends the child
+        if let Some(task) = self.updates.lock().unwrap().take() {
             task.abort();
+        }
+        for server in self.servers.lock().unwrap().values() {
+            server.stop();
         }
     }
 
-    pub async fn install(&self, spec: Spec) -> Result<String> {
-        check_source(&spec.source)?;
-        let id = new_id()?;
-        let dir = self.dir.join(&id);
-        let result = self.install_into(&dir, &spec).await;
-        if let Err(e) = result {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
+    pub fn isolation(&self) -> &'static str {
+        match sandbox::isolation() {
+            sandbox::Isolation::Full => "full",
+            sandbox::Isolation::Partial => "partial",
         }
-        std::fs::write(dir.join(SPEC_FILE), serde_json::to_vec_pretty(&spec)?)?;
-        info!("mcp server {} installed as {id}", spec.name);
-        self.spawn(id.clone(), spec);
+    }
+
+    pub fn catalog(&self) -> Vec<McpListing> {
+        catalog::selection()
+    }
+
+    pub async fn search(&self, query: &str) -> Result<Vec<McpListing>> {
+        catalog::search(&self.http, &self.registries(), query).await
+    }
+
+    //bundles carry their form in the manifest
+    pub async fn prepare(&self, mut listing: McpListing) -> Result<McpListing> {
+        install::check_source(&listing.source)?;
+        if let McpSource::Mcpb { url, sha256 } = &listing.source {
+            let bytes = install::download_bundle(&self.http, url, sha256).await?;
+            let manifest = mcpb::Manifest::from_bundle(&bytes)?;
+            manifest.check_supported()?;
+            listing.fields = manifest.fields();
+        }
+        Ok(listing)
+    }
+
+    //answers at once, the install runs behind
+    pub fn install(
+        self: &Arc<Self>,
+        listing: McpListing,
+        values: BTreeMap<String, String>,
+    ) -> Result<String> {
+        install::check_source(&listing.source)?;
+        let (plain, secrets) = self.split(&listing, values)?;
+        let id = new_id()?;
+        self.db.put_mcp_secrets(&id, &secrets)?;
+        let spec = Spec {
+            listing,
+            values: plain,
+            enabled: true,
+        };
+        let server = self.insert(id.clone(), spec, State::Installing);
+        self.behind(server);
         Ok(id)
     }
 
+    //installs or reinstalls, then starts
+    fn behind(self: &Arc<Self>, server: Arc<Server>) {
+        let mcp = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mcp.finish_install(&server).await {
+                warn!("mcp server {} not installed: {e:#}", server.title());
+                let _ = std::fs::remove_dir_all(server.dir.join("package"));
+                *server.state.lock().unwrap() = State::Failed(format!("{e:#}"));
+            }
+        });
+    }
+
+    async fn finish_install(&self, server: &Arc<Server>) -> Result<()> {
+        let spec = server.spec.lock().unwrap().clone();
+        let listing =
+            install::install(&self.runtimes, &self.http, &server.dir, &spec.listing).await?;
+        //a bundle may declare other fields than the device saw
+        let mut values = spec.values.clone();
+        values.extend(self.db.mcp_secrets(&server.id)?);
+        let (plain, secrets) = self.split(&listing, values)?;
+        let spec = Spec {
+            listing,
+            values: plain,
+            enabled: spec.enabled,
+        };
+        write_spec(&server.dir, &spec)?;
+        self.db.put_mcp_secrets(&server.id, &secrets)?;
+        info!(
+            "mcp server {} installed as {}",
+            spec.listing.title, server.id
+        );
+        let enabled = spec.enabled;
+        *server.spec.lock().unwrap() = spec;
+        *server.update.lock().unwrap() = None;
+        if enabled {
+            self.start(server);
+        } else {
+            *server.state.lock().unwrap() = State::Stopped;
+        }
+        Ok(())
+    }
+
+    pub fn configure(&self, id: &str, values: BTreeMap<String, String>) -> Result<()> {
+        let server = self.ready(id)?;
+        let mut spec = server.spec.lock().unwrap().clone();
+        let mut secrets = self.db.mcp_secrets(id)?;
+        let mut merged: BTreeMap<String, String> = spec.values.clone();
+        merged.extend(secrets.clone());
+        merged.extend(values);
+        let (plain, kept) = self.split(&spec.listing, merged)?;
+        spec.values = plain;
+        secrets = kept;
+        write_spec(&server.dir, &spec)?;
+        self.db.put_mcp_secrets(id, &secrets)?;
+        let enabled = spec.enabled;
+        *server.spec.lock().unwrap() = spec;
+        if enabled {
+            self.start(&server);
+        }
+        Ok(())
+    }
+
+    pub fn enable(&self, id: &str, on: bool) -> Result<()> {
+        let server = self.ready(id)?;
+        let mut spec = server.spec.lock().unwrap().clone();
+        spec.enabled = on;
+        write_spec(&server.dir, &spec)?;
+        *server.spec.lock().unwrap() = spec;
+        if on {
+            self.start(&server);
+        } else {
+            server.stop();
+        }
+        Ok(())
+    }
+
+    pub fn restart(&self, id: &str) -> Result<()> {
+        let server = self.ready(id)?;
+        ensure!(
+            server.spec.lock().unwrap().enabled,
+            "this server is turned off"
+        );
+        self.start(&server);
+        Ok(())
+    }
+
+    //same values, newer package, behind
+    pub async fn update(self: &Arc<Self>, id: &str) -> Result<()> {
+        let server = self.ready(id)?;
+        let listing = server.spec.lock().unwrap().listing.clone();
+        let registry = listing
+            .registry
+            .clone()
+            .context("this server has no registry")?;
+        let latest = catalog::latest(&self.http, &registry, &listing.id)
+            .await?
+            .context("the registry no longer lists this server")?;
+        server.stop();
+        *server.state.lock().unwrap() = State::Installing;
+        let _ = std::fs::remove_dir_all(server.dir.join("package"));
+        server.spec.lock().unwrap().listing = latest;
+        self.behind(server);
+        Ok(())
+    }
+
     pub async fn remove(&self, id: &str) -> Result<()> {
-        let entry = self.servers.lock().unwrap().remove(id);
-        let (server, task) = entry.ok_or_else(|| anyhow!("no mcp server {id}"))?;
-        task.abort();
+        let server = self
+            .servers
+            .lock()
+            .unwrap()
+            .remove(id)
+            .ok_or_else(|| anyhow!("no mcp server {id}"))?;
+        server.stop();
         sandbox::forget(&container_name(&server.dir));
+        self.db.drop_mcp_secrets(id)?;
         //windows keeps files locked until the child exits
         for _ in 0..20 {
             if std::fs::remove_dir_all(&server.dir).is_ok() || !server.dir.exists() {
@@ -155,18 +324,85 @@ impl Mcp {
             .with_context(|| format!("cannot delete {}", server.dir.display()))
     }
 
-    pub fn state(&self, id: &str) -> Option<State> {
-        let servers = self.servers.lock().unwrap();
-        let (server, _) = servers.get(id)?;
-        Some(server.state.lock().unwrap().clone())
+    pub fn status(&self) -> Result<Vec<McpServer>> {
+        let servers: Vec<Arc<Server>> = self.servers.lock().unwrap().values().cloned().collect();
+        let mut list = Vec::new();
+        for server in servers {
+            let spec = server.spec.lock().unwrap().clone();
+            let (state, message) = match server.state.lock().unwrap().clone() {
+                State::Installing => ("installing", None),
+                State::Starting => ("starting", None),
+                State::Running => ("running", None),
+                State::Failed(error) => ("failed", Some(error)),
+                State::Stopped => ("stopped", None),
+            };
+            list.push(McpServer {
+                id: server.id.clone(),
+                listing: spec.listing,
+                enabled: spec.enabled,
+                state: state.into(),
+                message,
+                values: spec.values,
+                secrets_set: self.db.mcp_secrets(&server.id)?.into_keys().collect(),
+                tools: server.tools.lock().unwrap().clone(),
+                update: server.update.lock().unwrap().clone(),
+            });
+        }
+        list.sort_by(|a, b| a.listing.title.cmp(&b.listing.title));
+        Ok(list)
     }
 
-    pub fn log_tail(&self, id: &str) -> Vec<String> {
-        let servers = self.servers.lock().unwrap();
-        servers
-            .get(id)
-            .map(|(s, _)| s.tail.lock().unwrap().iter().cloned().collect())
-            .unwrap_or_default()
+    pub fn logs(&self, id: &str) -> Result<Vec<String>> {
+        Ok(self
+            .server(id)?
+            .tail
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect())
+    }
+
+    //subfolders of the user's home, never hub data
+    pub fn folders(&self, path: Option<&str>) -> Result<(String, Option<String>, Vec<String>)> {
+        let home = home_dir()?;
+        let path = match path {
+            Some(path) => self.check_folder(Path::new(path))?,
+            None => home.clone(),
+        };
+        let mut folders: Vec<String> = std::fs::read_dir(&path)?
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with('.'))
+            .filter(|name| self.check_folder(&path.join(name)).is_ok())
+            .collect();
+        folders.sort_by_key(|f| f.to_lowercase());
+        let parent = (path != home)
+            .then(|| path.parent().map(|p| p.to_string_lossy().into_owned()))
+            .flatten();
+        Ok((path.to_string_lossy().into_owned(), parent, folders))
+    }
+
+    pub fn registries(&self) -> Vec<String> {
+        std::fs::read(self.dir.join(REGISTRIES_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_else(|| vec![OFFICIAL_REGISTRY.to_string()])
+    }
+
+    pub fn set_registries(&self, urls: Vec<String>) -> Result<()> {
+        for url in &urls {
+            let parsed =
+                reqwest::Url::parse(url).with_context(|| format!("invalid registry {url}"))?;
+            ensure!(parsed.scheme() == "https", "registries use https");
+        }
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(
+            self.dir.join(REGISTRIES_FILE),
+            serde_json::to_vec_pretty(&urls)?,
+        )?;
+        Ok(())
     }
 
     //running servers devices can call
@@ -174,10 +410,10 @@ impl Mcp {
         let servers = self.servers.lock().unwrap();
         let mut list: Vec<ProviderInfo> = servers
             .values()
-            .filter(|(s, _)| *s.state.lock().unwrap() == State::Running)
-            .map(|(s, _)| ProviderInfo {
+            .filter(|s| *s.state.lock().unwrap() == State::Running)
+            .map(|s| ProviderInfo {
                 id: format!("{PROVIDER_PREFIX}{}", s.id),
-                name: s.spec.name.clone(),
+                name: s.title(),
                 kind: "mcp".into(),
             })
             .collect();
@@ -205,12 +441,12 @@ impl Mcp {
         } else {
             let mut raw = Vec::new();
             reader.take(MAX_BODY_BYTES).read_to_end(&mut raw).await?;
-            let bridge = {
-                let servers = self.servers.lock().unwrap();
-                servers
-                    .get(id)
-                    .and_then(|(s, _)| s.bridge.lock().unwrap().clone())
-            };
+            let bridge = self
+                .servers
+                .lock()
+                .unwrap()
+                .get(id)
+                .and_then(|s| s.bridge.lock().unwrap().clone());
             match (serde_json::from_slice::<Value>(&raw), bridge) {
                 (Err(_), _) => reply(400, Some(rpc_error(Value::Null, -32700, "invalid json"))),
                 (Ok(message), None) => reply(
@@ -240,117 +476,120 @@ impl Mcp {
         Ok(())
     }
 
-    fn spawn(&self, id: String, spec: Spec) {
-        let dir = self.dir.join(&id);
+    fn server(&self, id: &str) -> Result<Arc<Server>> {
+        self.servers
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no mcp server {id}"))
+    }
+
+    fn add(&self, id: String, spec: Spec) {
+        let enabled = spec.enabled;
+        let server = self.insert(id, spec, State::Stopped);
+        if enabled {
+            self.start(&server);
+        }
+    }
+
+    fn insert(&self, id: String, spec: Spec, state: State) -> Arc<Server> {
         let server = Arc::new(Server {
+            dir: self.dir.join(&id),
             id: id.clone(),
-            dir,
-            spec,
-            state: Mutex::new(State::Starting),
+            spec: Mutex::new(spec),
+            state: Mutex::new(state),
             bridge: Mutex::new(None),
             tail: Mutex::new(VecDeque::new()),
+            tools: Mutex::new(Vec::new()),
+            update: Mutex::new(None),
+            task: Mutex::new(None),
         });
-        let task = tokio::spawn(supervise(self.runtimes.clone(), server.clone()));
-        self.servers.lock().unwrap().insert(id, (server, task));
+        self.servers.lock().unwrap().insert(id, server.clone());
+        server
     }
 
-    async fn install_into(&self, dir: &Path, spec: &Spec) -> Result<()> {
-        let package = dir.join("package");
-        let home = dir.join("home");
-        std::fs::create_dir_all(&package)?;
-        std::fs::create_dir_all(&home)?;
-        match &spec.source {
-            Source::Mcpb { url, sha256 } => {
-                let bytes = self
-                    .http
-                    .get(url)
-                    .header("user-agent", "opera-hub")
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?;
-                ensure!(
-                    hex_sha256(&bytes) == sha256.to_ascii_lowercase(),
-                    "checksum mismatch for the bundle"
-                );
-                mcpb::unpack(&bytes, &package)?;
-                let manifest = Manifest::read(&package)?;
-                manifest.check_supported()?;
-                //fails early on a missing value
-                manifest.launch(&package, &home, &spec.config)?;
+    //a server busy installing waits
+    fn ready(&self, id: &str) -> Result<Arc<Server>> {
+        let server = self.server(id)?;
+        ensure!(
+            *server.state.lock().unwrap() != State::Installing,
+            "this server is still installing"
+        );
+        Ok(server)
+    }
+
+    fn start(&self, server: &Arc<Server>) {
+        server.stop();
+        let task = tokio::spawn(supervise(
+            self.runtimes.clone(),
+            self.db.clone(),
+            server.clone(),
+        ));
+        *server.task.lock().unwrap() = Some(task);
+    }
+
+    //splits values by field, checks folders and keys
+    fn split(
+        &self,
+        listing: &McpListing,
+        values: BTreeMap<String, String>,
+    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+        let mut plain = BTreeMap::new();
+        let mut secrets = BTreeMap::new();
+        for (key, value) in values {
+            let field = listing
+                .fields
+                .iter()
+                .find(|f| f.key == key)
+                .with_context(|| format!("unknown setting {key}"))?;
+            if value.is_empty() {
+                continue;
             }
-            Source::Npm {
-                package: name,
-                version,
-            } => {
-                self.runtimes.ensure_node().await?;
-                let args: Vec<OsString> = vec![
-                    self.runtimes.npm_cli().into(),
-                    "install".into(),
-                    "--prefix".into(),
-                    package.clone().into(),
-                    "--ignore-scripts".into(),
-                    "--no-audit".into(),
-                    "--no-fund".into(),
-                    "--omit=dev".into(),
-                    "--loglevel=error".into(),
-                    format!("{name}@{version}").into(),
-                ];
-                let env = vec![
-                    ("npm_config_cache".into(), home.join(".npm").into()),
-                    ("npm_config_update_notifier".into(), "false".into()),
-                ];
-                run_install(
-                    &self.runtimes.node_exe(),
-                    &args,
-                    env,
-                    &home,
-                    &self.node_path(),
-                )
-                .await?;
-                npm_entry(&package, name)?;
+            if matches!(field.kind.as_str(), "folder" | "file") {
+                self.check_folder(Path::new(&value))?;
             }
-            Source::Pypi {
-                package: name,
-                version,
-            } => {
-                let python = self.runtimes.python().await?;
-                let venv = package.join("venv");
-                let mut env = self.runtimes.uv_env();
-                env.push(("UV_CACHE_DIR".into(), home.join(".cache").join("uv").into()));
-                env.push(("UV_PYTHON_DOWNLOADS".into(), "never".into()));
-                let uv = self.runtimes.uv_exe();
-                let args: Vec<OsString> = vec![
-                    "venv".into(),
-                    venv.clone().into(),
-                    "--python".into(),
-                    python.into(),
-                ];
-                run_install(&uv, &args, env.clone(), &home, &[]).await?;
-                env.push(("VIRTUAL_ENV".into(), venv.clone().into()));
-                let args: Vec<OsString> = vec![
-                    "pip".into(),
-                    "install".into(),
-                    //wheels only, no build script runs
-                    "--no-build".into(),
-                    format!("{name}=={version}").into(),
-                ];
-                run_install(&uv, &args, env, &home, &[]).await?;
-                python_entry(&venv, name)?;
+            if field.secret {
+                secrets.insert(key, value);
+            } else {
+                plain.insert(key, value);
             }
         }
-        Ok(())
+        for field in listing
+            .fields
+            .iter()
+            .filter(|f| f.required && f.default.is_none())
+        {
+            ensure!(
+                plain.contains_key(&field.key) || secrets.contains_key(&field.key),
+                "{} is required",
+                field.label
+            );
+        }
+        Ok((plain, secrets))
     }
 
-    fn node_path(&self) -> Vec<PathBuf> {
-        self.runtimes
-            .node_exe()
-            .parent()
-            .map(Path::to_path_buf)
-            .into_iter()
-            .collect()
+    fn check_folder(&self, path: &Path) -> Result<PathBuf> {
+        let real = path
+            .canonicalize()
+            .with_context(|| format!("{} does not exist", path.display()))?;
+        let home = home_dir()?.canonicalize()?;
+        ensure!(
+            real.starts_with(&home),
+            "only folders of your home can be shared"
+        );
+        if let Ok(data) = self.data_dir.canonicalize() {
+            ensure!(!real.starts_with(&data), "the hub data cannot be shared");
+            ensure!(!data.starts_with(&real), "this folder holds the hub data");
+        }
+        Ok(path.to_path_buf())
     }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .context("no home folder")
 }
 
 //one app container per server folder
@@ -368,6 +607,11 @@ fn read_spec(dir: &Path) -> Result<Spec> {
     )?)?)
 }
 
+fn write_spec(dir: &Path, spec: &Spec) -> Result<()> {
+    std::fs::write(dir.join(SPEC_FILE), serde_json::to_vec_pretty(spec)?)?;
+    Ok(())
+}
+
 fn new_id() -> Result<String> {
     let mut bytes = [0u8; 6];
     getrandom::fill(&mut bytes).map_err(|e| anyhow!("no system randomness: {e}"))?;
@@ -378,247 +622,110 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+//daily, only reported until an admin accepts
+async fn watch_updates(mcp: Weak<Mcp>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let Some(hub) = mcp.upgrade() else {
+            return;
+        };
+        let servers: Vec<Arc<Server>> = hub.servers.lock().unwrap().values().cloned().collect();
+        for server in servers {
+            let listing = server.spec.lock().unwrap().listing.clone();
+            let Some(registry) = listing.registry.as_deref() else {
+                continue;
+            };
+            match catalog::latest(&hub.http, registry, &listing.id).await {
+                Ok(Some(latest)) if latest.version != listing.version => {
+                    *server.update.lock().unwrap() = Some(latest.version);
+                }
+                Ok(_) => {}
+                Err(e) => warn!("no update check for {}: {e:#}", listing.title),
+            }
+        }
+        drop(hub);
+        tokio::time::sleep(UPDATE_EVERY).await;
+    }
+}
+
 //restarts crashed servers until they crash too often
-async fn supervise(runtimes: Arc<Runtimes>, server: Arc<Server>) {
+async fn supervise(runtimes: Arc<Runtimes>, db: Arc<Db>, server: Arc<Server>) {
     let mut crashes: VecDeque<Instant> = VecDeque::new();
     loop {
         *server.state.lock().unwrap() = State::Starting;
-        let error = match run_once(&runtimes, &server).await {
+        let error = match run_once(&runtimes, &db, &server).await {
             Ok(Some(code)) => format!("exited with code {code}"),
             Ok(None) => "killed".to_string(),
             Err(e) => format!("{e:#}"),
         };
         *server.bridge.lock().unwrap() = None;
-        warn!("mcp server {} stopped: {error}", server.spec.name);
+        warn!("mcp server {} stopped: {error}", server.title());
         let now = Instant::now();
         crashes.push_back(now);
         crashes.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
+        *server.state.lock().unwrap() = State::Failed(error);
         if crashes.len() >= MAX_CRASHES {
-            *server.state.lock().unwrap() = State::Failed(error);
             return;
         }
-        *server.state.lock().unwrap() = State::Failed(error);
         let backoff = Duration::from_secs(1 << crashes.len().min(5));
         tokio::time::sleep(backoff).await;
     }
 }
 
-async fn run_once(runtimes: &Runtimes, server: &Arc<Server>) -> Result<Option<i32>> {
+async fn run_once(runtimes: &Runtimes, db: &Db, server: &Arc<Server>) -> Result<Option<i32>> {
     let package = server.dir.join("package");
     let home = server.dir.join("home");
-    let (program, args, extra, path) = launch(runtimes, &server.spec, &package, &home).await?;
-    let mut env = scrubbed_env(&home, &path)?;
-    env.extend(extra);
-    let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
-    //runs only its package, writes only its home
+    let spec = server.spec.lock().unwrap().clone();
+    let mut values = spec.values.clone();
+    values.extend(db.mcp_secrets(&server.id)?);
+    let launch = install::launch(runtimes, &spec.listing, &values, &package, &home).await?;
+    let mut env = scrubbed_env(&home, &launch.path)?;
+    env.extend(launch.env);
+    let args: Vec<OsString> = launch.args.into_iter().map(OsString::from).collect();
+    //chosen folders, as paths and as roots
+    let folders: Vec<PathBuf> = spec
+        .listing
+        .fields
+        .iter()
+        .filter(|f| matches!(f.kind.as_str(), "folder" | "file"))
+        .filter_map(|f| values.get(&f.key))
+        .map(PathBuf::from)
+        .collect();
+    let roots = folders
+        .iter()
+        .filter_map(|f| reqwest::Url::from_file_path(f).ok())
+        .map(|uri| json!({ "uri": uri.as_str() }))
+        .collect();
+    //runs only its package, writes only its home and folders
+    let mut write = vec![home.clone()];
+    write.extend(folders);
     let policy = Policy {
         name: container_name(&server.dir),
         shared: vec![runtimes.dir().to_path_buf()],
         read: vec![package],
-        write: vec![home.clone()],
+        write,
     };
-    let mut child =
-        sandbox::spawn(&program, &args, &env, &home, &policy).context("cannot start the server")?;
+    let mut child = sandbox::spawn(&launch.program, &args, &env, &home, &policy)
+        .context("cannot start the server")?;
 
     let stderr = child.stderr.take().context("no stderr")?;
     tokio::spawn(keep_log(stderr, server.clone()));
     let stdout = child.stdout.take().context("no stdout")?;
     let stdin = child.stdin.take().context("no stdin")?;
-    let bridge = Bridge::connect(stdout, stdin, Vec::new()).await?;
+    let bridge = Bridge::connect(stdout, stdin, roots).await?;
+    let listed = bridge
+        .handle(json!({ "jsonrpc": "2.0", "id": "tools", "method": "tools/list" }))
+        .await;
+    *server.tools.lock().unwrap() = listed
+        .and_then(|answer| answer["result"]["tools"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(String::from))
+        .collect();
     *server.bridge.lock().unwrap() = Some(bridge);
     *server.state.lock().unwrap() = State::Running;
-    info!("mcp server {} running", server.spec.name);
+    info!("mcp server {} running", spec.listing.title);
     child.wait().await
-}
-
-//program, args, env and path for one start
-async fn launch(
-    runtimes: &Runtimes,
-    spec: &Spec,
-    package: &Path,
-    home: &Path,
-) -> Result<(
-    PathBuf,
-    Vec<String>,
-    Vec<(OsString, OsString)>,
-    Vec<PathBuf>,
-)> {
-    match &spec.source {
-        Source::Npm { package: name, .. } => {
-            runtimes.ensure_node().await?;
-            let node = runtimes.node_exe();
-            let mut args = runtimes.node_flags()?;
-            args.push(npm_entry(package, name)?.to_string_lossy().into_owned());
-            args.extend(spec.args.iter().cloned());
-            let path = node.parent().map(Path::to_path_buf).into_iter().collect();
-            Ok((node, args, Vec::new(), path))
-        }
-        Source::Pypi { package: name, .. } => {
-            let venv = package.join("venv");
-            let script = python_entry(&venv, name)?;
-            let path = script.parent().map(Path::to_path_buf).into_iter().collect();
-            Ok((script, spec.args.clone(), Vec::new(), path))
-        }
-        Source::Mcpb { .. } => {
-            let manifest = Manifest::read(package)?;
-            let launch = manifest.launch(package, home, &spec.config)?;
-            let mut args = launch.args;
-            let program = match launch.command.as_str() {
-                "node" => {
-                    runtimes.ensure_node().await?;
-                    args.splice(0..0, runtimes.node_flags()?);
-                    //manifests write paths with slashes
-                    if cfg!(windows) {
-                        for arg in &mut args {
-                            if Path::new(arg.as_str()).is_absolute() {
-                                *arg = arg.replace('/', "\\");
-                            }
-                        }
-                    }
-                    runtimes.node_exe()
-                }
-                "python" | "python3" => runtimes.python().await?,
-                other => inside(package, Path::new(other))?,
-            };
-            let env = launch
-                .env
-                .into_iter()
-                .map(|(k, v)| (OsString::from(k), OsString::from(v)))
-                .collect();
-            let path = program
-                .parent()
-                .map(Path::to_path_buf)
-                .into_iter()
-                .collect();
-            Ok((program, args, env, path))
-        }
-    }
-}
-
-//bundled programs never leave the package
-fn inside(package: &Path, program: &Path) -> Result<PathBuf> {
-    let full = if program.is_absolute() {
-        program.to_path_buf()
-    } else {
-        package.join(program)
-    };
-    let real = full
-        .canonicalize()
-        .with_context(|| format!("the bundle has no {}", program.display()))?;
-    ensure!(
-        real.starts_with(package.canonicalize()?),
-        "the bundle runs a program outside itself"
-    );
-    Ok(real)
-}
-
-//the command an npm package declares
-fn npm_entry(package: &Path, name: &str) -> Result<PathBuf> {
-    let root = package.join("node_modules").join(name);
-    let manifest: Value = serde_json::from_slice(&std::fs::read(root.join("package.json"))?)?;
-    let short = name.rsplit('/').next().unwrap_or(name);
-    let bin = match &manifest["bin"] {
-        Value::String(bin) => bin.clone(),
-        Value::Object(bins) => bins
-            .get(short)
-            .or_else(|| bins.values().next())
-            .and_then(Value::as_str)
-            .context("invalid bin entry")?
-            .to_string(),
-        _ => bail!("{name} declares no command"),
-    };
-    let bin = Path::new(&bin);
-    ensure!(
-        bin.components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir)),
-        "{name} points its command outside the package"
-    );
-    //one separator style, scripts compare it to their own url
-    Ok(bin.components().fold(root, |path, part| path.join(part)))
-}
-
-//the console script a python package declares
-fn python_entry(venv: &Path, name: &str) -> Result<PathBuf> {
-    let normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '.'], "_");
-    let wanted = normalize(name);
-    let site = site_packages(venv).context("the venv has no site-packages")?;
-    let mut scripts = Vec::new();
-    for entry in std::fs::read_dir(&site)?.flatten() {
-        let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(dist) = file.strip_suffix(".dist-info") else {
-            continue;
-        };
-        let project = dist.rsplit_once('-').map_or(dist, |(p, _)| p);
-        if normalize(project) != wanted {
-            continue;
-        }
-        let points =
-            std::fs::read_to_string(entry.path().join("entry_points.txt")).unwrap_or_default();
-        let mut in_scripts = false;
-        for line in points.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_scripts = line == "[console_scripts]";
-            } else if in_scripts && let Some((script, _)) = line.split_once('=') {
-                scripts.push(script.trim().to_string());
-            }
-        }
-    }
-    let script = scripts
-        .iter()
-        .find(|s| normalize(s) == wanted)
-        .or(scripts.first())
-        .with_context(|| format!("{name} declares no command"))?;
-    Ok(if cfg!(windows) {
-        venv.join("Scripts").join(format!("{script}.exe"))
-    } else {
-        venv.join("bin").join(script)
-    })
-}
-
-fn site_packages(venv: &Path) -> Option<PathBuf> {
-    if cfg!(windows) {
-        return Some(venv.join("Lib").join("site-packages"));
-    }
-    std::fs::read_dir(venv.join("lib"))
-        .ok()?
-        .flatten()
-        .map(|e| e.path().join("site-packages"))
-        .find(|p| p.is_dir())
-}
-
-//installers run no package code, so outside the sandbox
-async fn run_install(
-    program: &Path,
-    args: &[OsString],
-    extra: Vec<(OsString, OsString)>,
-    home: &Path,
-    path: &[PathBuf],
-) -> Result<()> {
-    let mut env = scrubbed_env(home, path)?;
-    env.extend(extra);
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .env_clear()
-        .envs(env)
-        .current_dir(home)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let output = command.output().await.context("cannot run the installer")?;
-    if !output.status.success() {
-        let errors = String::from_utf8_lossy(&output.stderr);
-        let last: Vec<&str> = errors.lines().rev().take(8).collect();
-        bail!(
-            "install failed: {}",
-            last.into_iter().rev().collect::<Vec<_>>().join(
-                "
-"
-            )
-        );
-    }
-    Ok(())
 }
 
 //stderr goes to the log and the tail
@@ -646,90 +753,66 @@ async fn keep_log(stderr: sandbox::Reader, server: Arc<Server>) {
     }
 }
 
-//exact versions only, ranges change by themselves
-fn check_source(source: &Source) -> Result<()> {
-    let version_ok = |v: &str| {
-        v.starts_with(|c: char| c.is_ascii_digit())
-            && v.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b".+-!_".contains(&b))
-    };
-    match source {
-        Source::Mcpb { url, sha256 } => {
-            let url = reqwest::Url::parse(url).context("invalid bundle url")?;
-            let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-            ensure!(
-                url.scheme() == "https" || (url.scheme() == "http" && local),
-                "bundles download over https"
-            );
-            ensure!(
-                sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-                "invalid bundle checksum"
-            );
-        }
-        Source::Npm { package, version } => {
-            let part_ok = |p: &str| {
-                !p.is_empty()
-                    && !p.starts_with('.')
-                    && p.bytes().all(|b| {
-                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._~".contains(&b)
-                    })
-            };
-            let name_ok = match package.strip_prefix('@') {
-                Some(scoped) => scoped
-                    .split_once('/')
-                    .is_some_and(|(s, n)| part_ok(s) && part_ok(n)),
-                None => part_ok(package),
-            };
-            ensure!(
-                name_ok && package.len() <= 214,
-                "invalid npm package {package}"
-            );
-            ensure!(version_ok(version), "{version} is not an exact version");
-        }
-        Source::Pypi { package, version } => {
-            let name_ok = !package.is_empty()
-                && package
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
-                && package.starts_with(|c: char| c.is_ascii_alphanumeric());
-            ensure!(name_ok, "invalid python package {package}");
-            ensure!(version_ok(version), "{version} is not an exact version");
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use opera_hub_proto::McpField;
+
     use super::*;
 
-    fn npm(package: &str, version: &str) -> Source {
-        Source::Npm {
-            package: package.into(),
-            version: version.into(),
+    fn listing(fields: Vec<McpField>) -> McpListing {
+        let mut listing = catalog::selection().remove(0);
+        listing.fields = fields;
+        listing
+    }
+
+    fn field(key: &str, kind: &str, required: bool, secret: bool) -> McpField {
+        McpField {
+            key: key.into(),
+            label: key.into(),
+            description: String::new(),
+            kind: kind.into(),
+            required,
+            secret,
+            default: None,
         }
     }
 
-    #[test]
-    fn sources_need_exact_versions() {
-        assert!(check_source(&npm("@modelcontextprotocol/server-everything", "1.0.0")).is_ok());
-        assert!(check_source(&npm("left-pad", "^1.0.0")).is_err());
-        assert!(check_source(&npm("left-pad", "latest")).is_err());
-        assert!(check_source(&npm("../evil", "1.0.0")).is_err());
-        assert!(check_source(&npm("@scope", "1.0.0")).is_err());
-        let pypi = |package: &str, version: &str| Source::Pypi {
-            package: package.into(),
-            version: version.into(),
+    #[tokio::test]
+    async fn settings_are_checked_and_secrets_split() {
+        let data = std::env::temp_dir().join(format!("opera-hub-mcp-split-{}", new_id().unwrap()));
+        std::fs::create_dir_all(&data).unwrap();
+        let db = Arc::new(Db::open_with_key(&data.join("hub.db"), &[7u8; 32]).unwrap());
+        let mcp = Mcp::new(&data, crate::secrets::http_client().unwrap(), db);
+        let listing = listing(vec![
+            field("token", "text", true, true),
+            field("mode", "text", false, false),
+            field("folder", "folder", false, false),
+        ]);
+        let values = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<_, _>>()
         };
-        assert!(check_source(&pypi("mcp-server-time", "2026.10.10")).is_ok());
-        assert!(check_source(&pypi("mcp-server-time", ">=1")).is_err());
-        assert!(check_source(&pypi("x; rm -rf", "1")).is_err());
-        let bundle = |url: &str| Source::Mcpb {
-            url: url.into(),
-            sha256: "a".repeat(64),
-        };
-        assert!(check_source(&bundle("https://example.com/x.mcpb")).is_ok());
-        assert!(check_source(&bundle("http://127.0.0.1:8080/x.mcpb")).is_ok());
-        assert!(check_source(&bundle("http://example.com/x.mcpb")).is_err());
+
+        assert!(
+            mcp.split(&listing, values(&[("mode", "x")])).is_err(),
+            "required"
+        );
+        assert!(
+            mcp.split(&listing, values(&[("token", "t"), ("other", "x")]))
+                .is_err(),
+            "unknown"
+        );
+        let outside = data.join("data-folder");
+        std::fs::create_dir_all(&outside).unwrap();
+        let hub_data = values(&[("token", "t"), ("folder", &outside.to_string_lossy())]);
+        assert!(mcp.split(&listing, hub_data).is_err(), "hub data");
+        let (plain, secrets) = mcp
+            .split(&listing, values(&[("token", "t"), ("mode", "m")]))
+            .unwrap();
+        assert_eq!(plain, values(&[("mode", "m")]));
+        assert_eq!(secrets, values(&[("token", "t")]));
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

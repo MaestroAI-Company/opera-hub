@@ -10,7 +10,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
-    ADMIN_ALPN, HUB_ALPN, MODELS_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink,
+    ADMIN_ALPN, HUB_ALPN, MCP_ALPN, MODELS_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink,
     SECRETS_ALPN, SYNC_ALPN, UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
@@ -20,7 +20,7 @@ use crate::config::{self, Config};
 use crate::db::Db;
 use crate::lan;
 use crate::llama::{Llama, Models};
-use crate::mcp::Mcp;
+use crate::mcp::{Mcp, McpAdmin};
 use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
@@ -114,7 +114,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let llama = Llama::new(data_dir, http.clone());
     //models already on disk start serving
     llama.refresh();
-    let mcp = Mcp::new(data_dir, http.clone());
+    let mcp = Mcp::new(data_dir, http.clone(), db.clone());
     mcp.start_installed();
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
@@ -161,6 +161,10 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 },
                 &store,
             ),
+        )
+        .accept(
+            MCP_ALPN,
+            OverIroh::new(McpAdmin { mcp: mcp.clone() }, &store),
         )
         .accept(
             SYNC_ALPN,

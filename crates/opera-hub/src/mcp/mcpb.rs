@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use opera_hub_proto::McpField;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -46,9 +47,14 @@ pub struct Override {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
     pub title: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
     pub required: bool,
+    #[serde(default)]
+    pub sensitive: bool,
     pub default: Option<Value>,
 }
 
@@ -69,6 +75,44 @@ impl Manifest {
     pub fn read(dir: &Path) -> Result<Self> {
         let raw = std::fs::read(dir.join(MANIFEST)).context("the bundle has no manifest.json")?;
         serde_json::from_slice(&raw).context("invalid manifest.json")
+    }
+
+    //the manifest inside a bundle, nothing unpacked
+    pub fn from_bundle(bytes: &[u8]) -> Result<Self> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+        let mut raw = Vec::new();
+        archive
+            .by_name(MANIFEST)
+            .context("the bundle has no manifest.json")?
+            .read_to_end(&mut raw)?;
+        serde_json::from_slice(&raw).context("invalid manifest.json")
+    }
+
+    //user_config as form fields
+    pub fn fields(&self) -> Vec<McpField> {
+        self.user_config
+            .iter()
+            .map(|(key, field)| McpField {
+                key: key.clone(),
+                label: field.title.clone().unwrap_or_else(|| key.clone()),
+                description: field.description.clone().unwrap_or_default(),
+                kind: match field.kind.as_str() {
+                    "directory" => "folder",
+                    "file" => "file",
+                    "number" => "number",
+                    "boolean" => "boolean",
+                    _ => "text",
+                }
+                .into(),
+                required: field.required,
+                secret: field.sensitive,
+                default: match &field.default {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(Value::Null) | None => None,
+                    Some(other) => Some(other.to_string()),
+                },
+            })
+            .collect()
     }
 
     pub fn check_supported(&self) -> Result<()> {
@@ -283,6 +327,21 @@ mod tests {
         .unwrap();
         let manifest = Manifest::read(&dir).unwrap();
         manifest.check_supported().unwrap();
+        let fields = manifest.fields();
+        assert_eq!(
+            fields.iter().find(|f| f.key == "root").unwrap().kind,
+            "folder"
+        );
+        assert!(fields.iter().find(|f| f.key == "token").unwrap().secret);
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.key == "level")
+                .unwrap()
+                .default
+                .as_deref(),
+            Some("2")
+        );
 
         let home = dir.join("home");
         assert!(manifest.launch(&dir, &home, &BTreeMap::new()).is_err());

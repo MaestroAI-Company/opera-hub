@@ -18,6 +18,7 @@ pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
 pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
 pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
 pub const MODELS_ALPN: &[u8] = b"opera/models/1";
+pub const MCP_ALPN: &[u8] = b"opera/mcp/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
@@ -277,6 +278,168 @@ pub enum SyncResponse {
     Changed {
         cursor: u64,
     },
+    Error {
+        message: String,
+    },
+}
+
+//where a hosted mcp server comes from, exact versions only
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpSource {
+    Mcpb { url: String, sha256: String },
+    Npm { package: String, version: String },
+    Pypi { package: String, version: String },
+}
+
+//one value the user fills in
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpField {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    //text, number, boolean, folder or file
+    pub kind: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub secret: bool,
+    pub default: Option<String>,
+}
+
+//a command line part, fixed or taken from a field
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpArgument {
+    pub flag: Option<String>,
+    pub value: Option<String>,
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpEnv {
+    pub name: String,
+    pub value: Option<String>,
+    pub field: Option<String>,
+}
+
+//a server the hub can install
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpListing {
+    //registry name, or a selection id
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub version: String,
+    pub publisher: String,
+    pub repository: Option<String>,
+    pub license: Option<String>,
+    pub source: McpSource,
+    #[serde(default)]
+    pub fields: Vec<McpField>,
+    #[serde(default)]
+    pub arguments: Vec<McpArgument>,
+    #[serde(default)]
+    pub env: Vec<McpEnv>,
+    //runs with no internet
+    #[serde(default)]
+    pub offline: bool,
+    //none for the selection and manual installs
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: String,
+    pub listing: McpListing,
+    pub enabled: bool,
+    //starting, running, failed or stopped
+    pub state: String,
+    pub message: Option<String>,
+    //secret values never leave the hub
+    pub values: std::collections::BTreeMap<String, String>,
+    pub secrets_set: Vec<String>,
+    pub tools: Vec<String>,
+    pub update: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpRequest {
+    Catalog,
+    Search {
+        query: String,
+    },
+    //fills the fields an mcpb manifest declares
+    Prepare {
+        listing: McpListing,
+    },
+    Install {
+        listing: McpListing,
+        values: std::collections::BTreeMap<String, String>,
+    },
+    //missing keys stay, empty values clear
+    Configure {
+        id: String,
+        values: std::collections::BTreeMap<String, String>,
+    },
+    Enable {
+        id: String,
+        on: bool,
+    },
+    Restart {
+        id: String,
+    },
+    Update {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    Status,
+    Logs {
+        id: String,
+    },
+    //folders on the hub machine, home and below
+    Folders {
+        path: Option<String>,
+    },
+    Registries,
+    SetRegistries {
+        urls: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpResponse {
+    Listings {
+        listings: Vec<McpListing>,
+    },
+    Listing {
+        listing: Box<McpListing>,
+    },
+    Status {
+        //full or partial
+        isolation: String,
+        servers: Vec<McpServer>,
+    },
+    Installed {
+        id: String,
+    },
+    Logs {
+        lines: Vec<String>,
+    },
+    Folders {
+        path: String,
+        parent: Option<String>,
+        folders: Vec<String>,
+    },
+    Registries {
+        urls: Vec<String>,
+    },
+    Done,
     Error {
         message: String,
     },
