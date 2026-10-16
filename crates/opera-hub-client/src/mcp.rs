@@ -362,6 +362,14 @@ impl HubClient {
         self.mcp_urls(&hub, McpRequest::Registries).await
     }
 
+    //raw opera/mcp/1 json, for bridges that speak json
+    pub async fn mcp_json(&self, hub: PairedHub, request: String) -> Result<String, HubError> {
+        let request: McpRequest = serde_json::from_str(&request)
+            .map_err(|e| HubError::Internal(format!("invalid mcp request: {e}")))?;
+        let response = self.mcp(&hub, request).await?;
+        serde_json::to_string(&response).map_err(|e| HubError::Internal(e.to_string()))
+    }
+
     pub async fn mcp_set_registries(
         &self,
         hub: PairedHub,
