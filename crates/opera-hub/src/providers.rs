@@ -58,6 +58,7 @@ pub struct Providers {
     pub settings: Arc<crate::settings::Settings>,
     //models the hub runs itself
     pub llama: Arc<crate::llama::Llama>,
+    pub mcp: Arc<crate::mcp::Mcp>,
 }
 
 impl std::fmt::Debug for Providers {
@@ -100,7 +101,8 @@ impl Protocol for Providers {
 
 impl Providers {
     async fn detect(&self) -> Vec<ProviderInfo> {
-        let mut found = Vec::new();
+        //installed by an admin, shared on purpose
+        let mut found = self.mcp.providers();
         if !self.settings.get().share_providers {
             return found;
         }
@@ -132,6 +134,9 @@ impl Providers {
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
     {
+        if let Some(id) = head.provider.strip_prefix(crate::mcp::PROVIDER_PREFIX) {
+            return self.mcp.forward(id, &head, reader, writer).await;
+        }
         if !self.settings.get().share_providers {
             bail!("this hub does not share its providers");
         }

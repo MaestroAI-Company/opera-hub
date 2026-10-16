@@ -3836,12 +3836,14 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "uniffi",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "zip",
 ]
 
 [[package]]

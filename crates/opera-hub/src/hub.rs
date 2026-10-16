@@ -20,6 +20,7 @@ use crate::config::{self, Config};
 use crate::db::Db;
 use crate::lan;
 use crate::llama::{Llama, Models};
+use crate::mcp::Mcp;
 use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
@@ -59,6 +60,7 @@ pub async fn run_with_targets(
 struct Running {
     router: Router,
     llama: Arc<Llama>,
+    mcp: Arc<Mcp>,
     lan: tokio::task::JoinHandle<()>,
     updates: tokio::task::JoinHandle<()>,
     _lock: std::fs::File,
@@ -68,6 +70,7 @@ impl Running {
     async fn stop(self) -> Result<()> {
         info!("hub stopping");
         self.llama.stop_server();
+        self.mcp.stop_all();
         self.lan.abort();
         self.updates.abort();
         self.router.shutdown().await?;
@@ -111,6 +114,8 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let llama = Llama::new(data_dir, http.clone());
     //models already on disk start serving
     llama.refresh();
+    let mcp = Mcp::new(data_dir, http.clone());
+    mcp.start_installed();
     let name: Arc<str> = config.hub_name().into();
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))
@@ -180,6 +185,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                     targets: Arc::new(targets),
                     settings,
                     llama: llama.clone(),
+                    mcp: mcp.clone(),
                 },
                 &store,
             ),
@@ -188,6 +194,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     Ok(Running {
         router,
         llama,
+        mcp,
         lan,
         updates,
         _lock: lock,

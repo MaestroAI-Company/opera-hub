@@ -718,7 +718,7 @@ fn has_vulkan_linux() -> bool {
     .any(|path| Path::new(path).exists())
 }
 
-fn extract(name: &str, bytes: &[u8], into: &Path) -> Result<()> {
+pub(crate) fn extract(name: &str, bytes: &[u8], into: &Path) -> Result<()> {
     if name.ends_with(".zip") {
         zip::ZipArchive::new(std::io::Cursor::new(bytes))?.extract(into)?;
     } else {
@@ -754,7 +754,7 @@ fn free_port() -> Result<u16> {
         .port())
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
