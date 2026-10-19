@@ -55,12 +55,15 @@ impl DataSync {
                 records,
             } => {
                 check_collection(&collection)?;
-                self.db.push(&collection, &peer.id, &records)?;
+                self.db
+                    .push(peer.profile()?, &collection, &peer.id, &records)?;
                 SyncResponse::Pushed
             }
             SyncRequest::Pull { collection, since } => {
                 check_collection(&collection)?;
-                let (records, cursor, more) = self.db.pull(&collection, since, PULL_LIMIT)?;
+                let (records, cursor, more) =
+                    self.db
+                        .pull(peer.profile()?, &collection, since, PULL_LIMIT)?;
                 SyncResponse::Records {
                     records,
                     cursor,
@@ -68,13 +71,21 @@ impl DataSync {
                 }
             }
             SyncRequest::Watch { since } => {
+                let profile = peer.profile()?;
                 let mut changes = self.db.subscribe();
+                //other profiles wake it too
+                let wait = async {
+                    while self.db.latest(profile)? <= since {
+                        changes.changed().await?;
+                    }
+                    anyhow::Ok(())
+                };
                 //a timeout answers anyway so the client loops
-                let _ =
-                    tokio::time::timeout(WATCH_TIMEOUT, changes.wait_for(|latest| *latest > since))
-                        .await;
+                if let Ok(result) = tokio::time::timeout(WATCH_TIMEOUT, wait).await {
+                    result?;
+                }
                 SyncResponse::Changed {
-                    cursor: *changes.borrow(),
+                    cursor: self.db.latest(profile)?,
                 }
             }
         })

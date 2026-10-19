@@ -21,7 +21,7 @@ use crate::db::Db;
 use crate::lan;
 use crate::llama::{Llama, Models};
 use crate::mcp::{Mcp, McpAdmin};
-use crate::protocols::{Admin, Pair, Peer, Ping, Protocol, Session, admit, still_allowed};
+use crate::protocols::{Admin, Pair, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
 use crate::settings::Settings;
@@ -338,21 +338,21 @@ impl<P> OverIroh<P> {
 
 impl<P: Protocol + std::fmt::Debug> ProtocolHandler for OverIroh<P> {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        let peer = Peer {
-            id: conn.remote_id().to_string(),
-        };
-        if !admit(&self.store, &peer, P::ACCESS).map_err(user_error)? {
+        let id = conn.remote_id().to_string();
+        if admit(&self.store, &id, P::ACCESS)
+            .map_err(user_error)?
+            .is_none()
+        {
             conn.close(UNAUTHORIZED.into(), b"unauthorized");
             return Ok(());
         }
         //ends when the client closes the connection
         while let Ok((mut send, recv)) = conn.accept_bi().await {
-            if !still_allowed(&self.store, &peer, P::ACCESS).map_err(user_error)? {
+            let Some(peer) = still_allowed(&self.store, &id, P::ACCESS).map_err(user_error)? else {
                 conn.close(UNAUTHORIZED.into(), b"removed");
                 return Ok(());
-            }
+            };
             let protocol = self.protocol.clone();
-            let peer = peer.clone();
             tokio::spawn(async move {
                 match protocol.serve(peer, recv, &mut send).await {
                     Ok(()) => {

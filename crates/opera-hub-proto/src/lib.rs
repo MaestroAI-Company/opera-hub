@@ -14,9 +14,9 @@ pub const PING_ALPN: &[u8] = b"opera/ping/0";
 pub const PAIR_ALPN: &[u8] = b"opera/pair/1";
 pub const HUB_ALPN: &[u8] = b"opera/hub/1";
 pub const ADMIN_ALPN: &[u8] = b"opera/admin/1";
-pub const SECRETS_ALPN: &[u8] = b"opera/secrets/1";
+pub const SECRETS_ALPN: &[u8] = b"opera/secrets/2";
 pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
-pub const SYNC_ALPN: &[u8] = b"opera/sync/1";
+pub const SYNC_ALPN: &[u8] = b"opera/sync/2";
 pub const MODELS_ALPN: &[u8] = b"opera/models/1";
 pub const MCP_ALPN: &[u8] = b"opera/mcp/1";
 
@@ -186,6 +186,25 @@ pub struct DeviceInfo {
     //hashed per hub, survives reinstalls
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    //none until a profile is unlocked
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+//one person on the hub
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInfo {
+    pub id: String,
+    pub name: String,
+    pub role: ProfileRole,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileRole {
+    Admin,
+    Member,
 }
 
 //last writer wins on updated_at then device

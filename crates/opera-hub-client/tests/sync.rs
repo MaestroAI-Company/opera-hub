@@ -25,10 +25,24 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str) -> Pai
             .await
         {
             Err(HubError::Unreachable(_)) => tokio::time::sleep(Duration::from_secs(2)).await,
-            result => return result.unwrap(),
+            result => {
+                let paired = result.unwrap();
+                join(data_dir, &client.device_id());
+                return paired;
+            }
         }
     }
     panic!("hub never became reachable");
+}
+
+//binds a device to the first profile
+fn join(data_dir: &std::path::Path, device: &str) {
+    let store = opera_hub::store::Store::new(data_dir);
+    let profile = match store.profiles().unwrap().into_iter().next() {
+        Some(profile) => profile,
+        None => store.create_profile("owner").unwrap(),
+    };
+    assert!(store.bind_device(device, &profile.id).unwrap());
 }
 
 fn record(id: &str, updated_at: u64, payload: String) -> SyncRecord {
@@ -119,7 +133,65 @@ async fn data_sync_and_watch() {
         .pair(link, "browser".into(), "web".into(), None)
         .await
         .unwrap();
+    join(&data_dir, &browser.device_id());
     assert_eq!(browser.devices(hub_ref.clone()).await.unwrap().len(), 3);
+
+    //a device without profile cannot sync
+    let stranger = new_client();
+    let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
+    stranger
+        .pair(link, "stranger".into(), "phone".into(), None)
+        .await
+        .unwrap();
+    assert!(
+        stranger
+            .pull(hub_ref.clone(), "conversations".into(), 0)
+            .await
+            .is_err()
+    );
+
+    //another profile sees its own data only
+    let store = opera_hub::store::Store::new(&data_dir);
+    let flatmate = store.create_profile("flatmate").unwrap();
+    assert!(
+        store
+            .bind_device(&stranger.device_id(), &flatmate.id)
+            .unwrap()
+    );
+    assert_eq!(
+        stranger.watch(hub_ref.clone(), 0).await.unwrap(),
+        0,
+        "the phone writes never wake another profile"
+    );
+    stranger
+        .push(
+            hub_ref.clone(),
+            "conversations".into(),
+            vec![record("conv", 20, r#"{"name":"theirs"}"#.into())],
+        )
+        .await
+        .unwrap();
+    let theirs = stranger
+        .pull(hub_ref.clone(), "conversations".into(), 0)
+        .await
+        .unwrap();
+    assert_eq!(theirs.records.len(), 1);
+    assert_eq!(
+        theirs.records[0].payload.as_deref(),
+        Some(r#"{"name":"theirs"}"#)
+    );
+    let mine = laptop
+        .pull(hub_ref.clone(), "conversations".into(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        mine.records[0].payload.as_deref(),
+        Some(r#"{"name":"hello"}"#)
+    );
+    //a member lists its own devices only
+    let listed = stranger.devices(hub_ref.clone()).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].profile.as_deref(), Some(flatmate.id.as_str()));
 
     let unknown = laptop.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");

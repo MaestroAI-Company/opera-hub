@@ -13,6 +13,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 const DB_FILE: &str = "hub.db";
 const KEY_FILE: &str = "data.key";
 const NONCE_BYTES: usize = 24;
+//rows carry their profile since 1
+const SCHEMA_VERSION: u32 = 1;
 //keeps a pull page well under the frame limit
 const PULL_BYTES: usize = 2 * 1024 * 1024;
 
@@ -36,8 +38,18 @@ impl Db {
         }
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-        conn.execute_batch(
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        //devices push everything again
+        if version < SCHEMA_VERSION {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS records_seq;
+                DROP TABLE IF EXISTS records;
+                DROP TABLE IF EXISTS grants;",
+            )?;
+        }
+        conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS records (
+                profile TEXT NOT NULL,
                 collection TEXT NOT NULL,
                 id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
@@ -45,19 +57,21 @@ impl Db {
                 device TEXT NOT NULL,
                 deleted INTEGER NOT NULL,
                 payload BLOB,
-                PRIMARY KEY (collection, id)
+                PRIMARY KEY (profile, collection, id)
             );
-            CREATE INDEX IF NOT EXISTS records_seq ON records (collection, seq);
+            CREATE INDEX IF NOT EXISTS records_seq ON records (profile, collection, seq);
             CREATE TABLE IF NOT EXISTS grants (
-                server_id TEXT PRIMARY KEY,
-                grant BLOB NOT NULL
+                profile TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                grant BLOB NOT NULL,
+                PRIMARY KEY (profile, server_id)
             );
             CREATE TABLE IF NOT EXISTS mcp_secrets (
                 server TEXT PRIMARY KEY,
                 secrets BLOB NOT NULL
             );
-            DELETE FROM records WHERE collection = 'accounts';",
-        )?;
+            PRAGMA user_version = {SCHEMA_VERSION};"
+        ))?;
         let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| anyhow!("bad data key"))?;
         let latest: u64 =
             conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM records", [], |row| {
@@ -74,15 +88,22 @@ impl Db {
         self.changes.subscribe()
     }
 
-    pub fn push(&self, collection: &str, device: &str, records: &[Record]) -> Result<()> {
+    pub fn push(
+        &self,
+        profile: &str,
+        collection: &str,
+        device: &str,
+        records: &[Record],
+    ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let mut latest = None;
         for record in records {
             let current: Option<u64> = tx
                 .query_row(
-                    "SELECT updated_at FROM records WHERE collection = ?1 AND id = ?2",
-                    params![collection, record.id],
+                    "SELECT updated_at FROM records
+                     WHERE profile = ?1 AND collection = ?2 AND id = ?3",
+                    params![profile, collection, record.id],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -96,14 +117,14 @@ impl Db {
                 })?;
             let payload = match (&record.payload, record.deleted) {
                 (Some(payload), false) => {
-                    Some(self.seal(&aad(collection, &record.id), payload.as_bytes())?)
+                    Some(self.seal(&aad(&[profile, collection, &record.id]), payload.as_bytes())?)
                 }
                 _ => None,
             };
             tx.execute(
-                "INSERT OR REPLACE INTO records (collection, id, seq, updated_at, device, deleted, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![collection, record.id, seq, record.updated_at, device, record.deleted, payload],
+                "INSERT OR REPLACE INTO records (profile, collection, id, seq, updated_at, device, deleted, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![profile, collection, record.id, seq, record.updated_at, device, record.deleted, payload],
             )?;
             latest = Some(seq);
         }
@@ -117,6 +138,7 @@ impl Db {
     //last seq becomes the next cursor
     pub fn pull(
         &self,
+        profile: &str,
         collection: &str,
         since: u64,
         limit: usize,
@@ -124,17 +146,20 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, seq, updated_at, deleted, payload FROM records
-             WHERE collection = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
+             WHERE profile = ?1 AND collection = ?2 AND seq > ?3 ORDER BY seq LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![collection, since, limit as i64 + 1], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u64>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![profile, collection, since, limit as i64 + 1],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                ))
+            },
+        )?;
         let mut records = Vec::new();
         let mut cursor = since;
         let mut more = false;
@@ -148,7 +173,7 @@ impl Db {
             bytes += sealed.as_ref().map_or(0, Vec::len);
             let payload = match sealed {
                 Some(sealed) => Some(String::from_utf8(
-                    self.unseal(&aad(collection, &id), &sealed)?,
+                    self.unseal(&aad(&[profile, collection, &id]), &sealed)?,
                 )?),
                 None => None,
             };
@@ -163,48 +188,67 @@ impl Db {
         Ok((records, cursor, more))
     }
 
-    pub fn put_grant(&self, grant: &OAuthGrant) -> Result<()> {
+    //newest seq of a profile
+    pub fn latest(&self, profile: &str) -> Result<u64> {
+        Ok(self.conn.lock().unwrap().query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM records WHERE profile = ?1",
+            params![profile],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn remove_profile(&self, profile: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM records WHERE profile = ?1", params![profile])?;
+        conn.execute("DELETE FROM grants WHERE profile = ?1", params![profile])?;
+        Ok(())
+    }
+
+    pub fn put_grant(&self, profile: &str, grant: &OAuthGrant) -> Result<()> {
         let sealed = self.seal(
-            &aad("grants", &grant.server_id),
+            &aad(&[profile, "grants", &grant.server_id]),
             &serde_json::to_vec(grant)?,
         )?;
         self.conn.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO grants (server_id, grant) VALUES (?1, ?2)",
-            params![grant.server_id, sealed],
+            "INSERT OR REPLACE INTO grants (profile, server_id, grant) VALUES (?1, ?2, ?3)",
+            params![profile, grant.server_id, sealed],
         )?;
         Ok(())
     }
 
-    pub fn grant(&self, server_id: &str) -> Result<Option<OAuthGrant>> {
+    pub fn grant(&self, profile: &str, server_id: &str) -> Result<Option<OAuthGrant>> {
         let sealed: Option<Vec<u8>> = self
             .conn
             .lock()
             .unwrap()
             .query_row(
-                "SELECT grant FROM grants WHERE server_id = ?1",
-                params![server_id],
+                "SELECT grant FROM grants WHERE profile = ?1 AND server_id = ?2",
+                params![profile, server_id],
                 |row| row.get(0),
             )
             .optional()?;
         match sealed {
             Some(sealed) => Ok(Some(serde_json::from_slice(
-                &self.unseal(&aad("grants", server_id), &sealed)?,
+                &self.unseal(&aad(&[profile, "grants", server_id]), &sealed)?,
             )?)),
             None => Ok(None),
         }
     }
 
-    pub fn drop_grant(&self, server_id: &str) -> Result<()> {
+    pub fn drop_grant(&self, profile: &str, server_id: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "DELETE FROM grants WHERE server_id = ?1",
-            params![server_id],
+            "DELETE FROM grants WHERE profile = ?1 AND server_id = ?2",
+            params![profile, server_id],
         )?;
         Ok(())
     }
 
     //secret config of a hosted mcp server
     pub fn put_mcp_secrets(&self, server: &str, secrets: &BTreeMap<String, String>) -> Result<()> {
-        let sealed = self.seal(&aad("mcp_secrets", server), &serde_json::to_vec(secrets)?)?;
+        let sealed = self.seal(
+            &aad(&["mcp_secrets", server]),
+            &serde_json::to_vec(secrets)?,
+        )?;
         self.conn.lock().unwrap().execute(
             "INSERT OR REPLACE INTO mcp_secrets (server, secrets) VALUES (?1, ?2)",
             params![server, sealed],
@@ -225,7 +269,7 @@ impl Db {
             .optional()?;
         match sealed {
             Some(sealed) => Ok(serde_json::from_slice(
-                &self.unseal(&aad("mcp_secrets", server), &sealed)?,
+                &self.unseal(&aad(&["mcp_secrets", server]), &sealed)?,
             )?),
             None => Ok(BTreeMap::new()),
         }
@@ -262,8 +306,8 @@ impl Db {
 }
 
 //binds ciphertext to its row
-fn aad(collection: &str, id: &str) -> Vec<u8> {
-    [collection.as_bytes(), b"\0", id.as_bytes()].concat()
+fn aad(parts: &[&str]) -> Vec<u8> {
+    parts.join("\0").into_bytes()
 }
 
 //os keychain or a key file
@@ -360,13 +404,14 @@ mod tests {
     #[test]
     fn last_writer_wins() {
         let db = temp_db();
-        db.push("providers", "a", &[record("x", 10, "new")])
+        db.push("p", "providers", "a", &[record("x", 10, "new")])
             .unwrap();
-        db.push("providers", "b", &[record("x", 5, "old")]).unwrap();
+        db.push("p", "providers", "b", &[record("x", 5, "old")])
+            .unwrap();
         //a tie keeps the first write
-        db.push("providers", "z", &[record("x", 10, "echo")])
+        db.push("p", "providers", "z", &[record("x", 10, "echo")])
             .unwrap();
-        let (records, cursor, more) = db.pull("providers", 0, 10).unwrap();
+        let (records, cursor, more) = db.pull("p", "providers", 0, 10).unwrap();
         assert_eq!(records, vec![record("x", 10, "new")]);
         assert!(!more);
 
@@ -376,9 +421,9 @@ mod tests {
             deleted: true,
             payload: None,
         };
-        db.push("providers", "b", std::slice::from_ref(&tombstone))
+        db.push("p", "providers", "b", std::slice::from_ref(&tombstone))
             .unwrap();
-        let (records, _, _) = db.pull("providers", cursor, 10).unwrap();
+        let (records, _, _) = db.pull("p", "providers", cursor, 10).unwrap();
         assert_eq!(records, vec![tombstone]);
     }
 
@@ -386,17 +431,17 @@ mod tests {
     fn pull_pages_by_cursor() {
         let db = temp_db();
         let records: Vec<_> = (0..5).map(|i| record(&format!("r{i}"), 1, "p")).collect();
-        db.push("providers", "a", &records).unwrap();
-        let (page, cursor, more) = db.pull("providers", 0, 3).unwrap();
+        db.push("p", "providers", "a", &records).unwrap();
+        let (page, cursor, more) = db.pull("p", "providers", 0, 3).unwrap();
         assert_eq!((page.len(), more), (3, true));
-        let (page, _, more) = db.pull("providers", cursor, 3).unwrap();
+        let (page, _, more) = db.pull("p", "providers", cursor, 3).unwrap();
         assert_eq!((page.len(), more), (2, false));
     }
 
     #[test]
     fn payloads_are_sealed() {
         let db = temp_db();
-        db.push("providers", "a", &[record("x", 1, "sk-secret-key")])
+        db.push("p", "providers", "a", &[record("x", 1, "sk-secret-key")])
             .unwrap();
         let raw: Vec<u8> = db
             .conn
@@ -405,5 +450,52 @@ mod tests {
             .query_row("SELECT payload FROM records", [], |row| row.get(0))
             .unwrap();
         assert!(!raw.windows(13).any(|w| w == b"sk-secret-key"));
+    }
+
+    #[test]
+    fn profiles_never_see_each_other() {
+        let db = temp_db();
+        db.push("owner", "conversations", "a", &[record("x", 1, "mine")])
+            .unwrap();
+        db.push(
+            "flatmate",
+            "conversations",
+            "b",
+            &[record("x", 2, "theirs")],
+        )
+        .unwrap();
+        let (records, _, _) = db.pull("owner", "conversations", 0, 10).unwrap();
+        assert_eq!(records, vec![record("x", 1, "mine")]);
+        let (records, _, _) = db.pull("flatmate", "conversations", 0, 10).unwrap();
+        assert_eq!(records, vec![record("x", 2, "theirs")]);
+        assert!(db.latest("flatmate").unwrap() > db.latest("owner").unwrap());
+
+        db.remove_profile("flatmate").unwrap();
+        assert_eq!(db.latest("flatmate").unwrap(), 0);
+        assert_eq!(db.pull("owner", "conversations", 0, 10).unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn old_schema_is_dropped() {
+        let path = std::env::temp_dir()
+            .join(format!("opera-hub-db-old-{}", std::process::id()))
+            .join(DB_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE records (collection TEXT, id TEXT, seq INTEGER, updated_at INTEGER,
+                 device TEXT, deleted INTEGER, payload BLOB, PRIMARY KEY (collection, id));
+                 INSERT INTO records VALUES ('conversations', 'x', 1, 1, 'a', 0, NULL);",
+            )
+            .unwrap();
+        let db = Db::open_with_key(&path, &[7u8; 32]).unwrap();
+        db.push("p", "conversations", "a", &[record("x", 1, "new")])
+            .unwrap();
+        drop(db);
+        //a second open keeps the rows
+        let db = Db::open_with_key(&path, &[7u8; 32]).unwrap();
+        assert_eq!(db.pull("p", "conversations", 0, 10).unwrap().0.len(), 1);
     }
 }

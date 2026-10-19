@@ -4,13 +4,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use opera_hub_proto::{
-    DeviceInfo, KIND_DESKTOP, KIND_PHONE, KIND_WEB, PairRejection, SCOPE_ADMIN, SCOPE_PROVIDERS,
-    SCOPE_SECRETS, SCOPE_SYNC,
+    DeviceInfo, KIND_DESKTOP, KIND_PHONE, KIND_WEB, PairRejection, ProfileInfo, ProfileRole,
+    SCOPE_ADMIN, SCOPE_PROVIDERS, SCOPE_SECRETS, SCOPE_SYNC,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const DEVICES_FILE: &str = "devices.json";
+const PROFILES_FILE: &str = "profiles.json";
 const PAIRING_FILE: &str = "pairing.json";
 pub const PAIRING_TTL: Duration = Duration::from_secs(10 * 60);
 
@@ -94,12 +95,83 @@ impl Store {
         Ok(true)
     }
 
+    pub fn profiles(&self) -> Result<Vec<ProfileInfo>> {
+        Ok(read_json(&self.dir.join(PROFILES_FILE))?.unwrap_or_default())
+    }
+
+    pub fn profile(&self, id: &str) -> Result<Option<ProfileInfo>> {
+        Ok(self
+            .profiles()?
+            .into_iter()
+            .find(|profile| profile.id == id))
+    }
+
+    //first profile manages the hub
+    pub fn create_profile(&self, name: &str) -> Result<ProfileInfo> {
+        let _guard = self.lock.lock().unwrap();
+        let mut profiles = self.profiles()?;
+        let profile = ProfileInfo {
+            id: random_hex()?,
+            name: name.to_string(),
+            role: if profiles.is_empty() {
+                ProfileRole::Admin
+            } else {
+                ProfileRole::Member
+            },
+            created_at: unix_now(),
+        };
+        profiles.push(profile.clone());
+        write_json(&self.dir.join(PROFILES_FILE), &profiles)?;
+        Ok(profile)
+    }
+
+    //false when no such profile
+    pub fn set_role(&self, id: &str, role: ProfileRole) -> Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        let mut profiles = self.profiles()?;
+        let Some(profile) = profiles.iter_mut().find(|profile| profile.id == id) else {
+            return Ok(false);
+        };
+        profile.role = role;
+        write_json(&self.dir.join(PROFILES_FILE), &profiles)?;
+        Ok(true)
+    }
+
+    //its devices are unpaired with it
+    pub fn remove_profile(&self, id: &str) -> Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        let mut profiles = self.profiles()?;
+        let before = profiles.len();
+        profiles.retain(|profile| profile.id != id);
+        if profiles.len() == before {
+            return Ok(false);
+        }
+        let mut devices = self.devices()?;
+        devices.retain(|device| device.profile.as_deref() != Some(id));
+        write_json(&self.dir.join(DEVICES_FILE), &devices)?;
+        write_json(&self.dir.join(PROFILES_FILE), &profiles)?;
+        Ok(true)
+    }
+
+    //false when device or profile is gone
+    pub fn bind_device(&self, id: &str, profile: &str) -> Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        if self.profile(profile)?.is_none() {
+            return Ok(false);
+        }
+        let mut devices = self.devices()?;
+        let Some(device) = devices.iter_mut().find(|device| device.id == id) else {
+            return Ok(false);
+        };
+        device.profile = Some(profile.to_string());
+        write_json(&self.dir.join(DEVICES_FILE), &devices)?;
+        Ok(true)
+    }
+
     //only the latest qr code works
     pub fn start_pairing(&self) -> Result<String> {
         let _guard = self.lock.lock().unwrap();
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no system randomness: {e}"))?;
-        let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let secret = random_hex()?;
         let pending = PendingPairing {
             secret: secret.clone(),
             expires_at: unix_now() + PAIRING_TTL.as_secs(),
@@ -136,6 +208,12 @@ impl Store {
         write_json(&self.dir.join(DEVICES_FILE), &devices)?;
         Ok(Ok(()))
     }
+}
+
+fn random_hex() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no system randomness: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 pub fn unix_now() -> u64 {
@@ -212,6 +290,7 @@ mod tests {
             paired_by: None,
             last_seen: None,
             machine: None,
+            profile: None,
         }
     }
 
@@ -232,5 +311,36 @@ mod tests {
         assert!(!store.device("b").unwrap().is_some());
         assert!(store.remove_device("a").unwrap());
         assert!(!store.device("a").unwrap().is_some());
+    }
+
+    #[test]
+    fn first_profile_is_admin() {
+        let store = temp_store();
+        let owner = store.create_profile("owner").unwrap();
+        let flatmate = store.create_profile("flatmate").unwrap();
+        assert_eq!(owner.role, ProfileRole::Admin);
+        assert_eq!(flatmate.role, ProfileRole::Member);
+        assert!(store.set_role(&flatmate.id, ProfileRole::Admin).unwrap());
+        assert_eq!(
+            store.profile(&flatmate.id).unwrap().unwrap().role,
+            ProfileRole::Admin
+        );
+    }
+
+    #[test]
+    fn removing_a_profile_unpairs_its_devices() {
+        let store = temp_store();
+        let owner = store.create_profile("owner").unwrap();
+        let flatmate = store.create_profile("flatmate").unwrap();
+        for (id, profile) in [("a", &owner), ("b", &flatmate), ("c", &flatmate)] {
+            let secret = store.start_pairing().unwrap();
+            store.finish_pairing(&secret, device(id)).unwrap().unwrap();
+            assert!(store.bind_device(id, &profile.id).unwrap());
+        }
+        assert!(!store.bind_device("a", "missing").unwrap());
+        assert!(store.remove_profile(&flatmate.id).unwrap());
+        let left: Vec<_> = store.devices().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(left, vec!["a"]);
+        assert!(!store.remove_profile(&flatmate.id).unwrap());
     }
 }

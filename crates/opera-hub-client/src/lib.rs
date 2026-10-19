@@ -238,6 +238,7 @@ pub struct HubDevice {
     pub paired_at: u64,
     pub paired_by: Option<String>,
     pub last_seen: Option<u64>,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -661,6 +662,7 @@ impl HubClient {
                 paired_at: d.paired_at,
                 paired_by: d.paired_by,
                 last_seen: d.last_seen,
+                profile: d.profile,
             })
             .collect())
     }

@@ -77,12 +77,15 @@ impl Secrets {
                 records,
             } => {
                 check_collection(&collection)?;
-                self.db.push(&collection, &peer.id, &records)?;
+                self.db
+                    .push(peer.profile()?, &collection, &peer.id, &records)?;
                 SecretsResponse::Pushed
             }
             SecretsRequest::Pull { collection, since } => {
                 check_collection(&collection)?;
-                let (records, cursor, more) = self.db.pull(&collection, since, PULL_LIMIT)?;
+                let (records, cursor, more) =
+                    self.db
+                        .pull(peer.profile()?, &collection, since, PULL_LIMIT)?;
                 SecretsResponse::Records {
                     records,
                     cursor,
@@ -91,22 +94,22 @@ impl Secrets {
             }
             SecretsRequest::PutGrant { grant } => {
                 check_endpoint(&grant.token_endpoint)?;
-                self.db.put_grant(&grant)?;
+                self.db.put_grant(peer.profile()?, &grant)?;
                 SecretsResponse::GrantSaved
             }
             SecretsRequest::AccessToken { server_id } => SecretsResponse::AccessToken {
-                token: self.access_token(&server_id).await?,
+                token: self.access_token(peer.profile()?, &server_id).await?,
             },
             SecretsRequest::DropGrant { server_id } => {
-                self.db.drop_grant(&server_id)?;
+                self.db.drop_grant(peer.profile()?, &server_id)?;
                 SecretsResponse::GrantDropped
             }
         })
     }
 
-    async fn access_token(&self, server_id: &str) -> Result<Option<AccessToken>> {
+    async fn access_token(&self, profile: &str, server_id: &str) -> Result<Option<AccessToken>> {
         let _guard = self.refreshing.lock().await;
-        let Some(mut grant) = self.db.grant(server_id)? else {
+        let Some(mut grant) = self.db.grant(profile, server_id)? else {
             return Ok(None);
         };
         if let Some(token) = &grant.access_token
@@ -135,7 +138,7 @@ impl Secrets {
                 "refresh refused for mcp server {server_id}: {}",
                 response.status()
             );
-            self.db.drop_grant(server_id)?;
+            self.db.drop_grant(profile, server_id)?;
             return Ok(None);
         }
         let response = response.error_for_status()?;
@@ -146,7 +149,7 @@ impl Secrets {
         if let Some(refresh) = doc.refresh_token {
             grant.refresh_token = refresh;
         }
-        self.db.put_grant(&grant)?;
+        self.db.put_grant(profile, &grant)?;
         Ok(Some(AccessToken {
             access_token: doc.access_token,
             expires_at: grant.expires_at,

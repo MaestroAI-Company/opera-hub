@@ -103,10 +103,24 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str, kind: 
             .await
         {
             Err(HubError::Unreachable(_)) => tokio::time::sleep(Duration::from_secs(2)).await,
-            result => return result.unwrap(),
+            result => {
+                let paired = result.unwrap();
+                join(data_dir, &client.device_id());
+                return paired;
+            }
         }
     }
     panic!("hub never became reachable");
+}
+
+//binds a device to the first profile
+fn join(data_dir: &std::path::Path, device: &str) {
+    let store = opera_hub::store::Store::new(data_dir);
+    let profile = match store.profiles().unwrap().into_iter().next() {
+        Some(profile) => profile,
+        None => store.create_profile("owner").unwrap(),
+    };
+    assert!(store.bind_device(device, &profile.id).unwrap());
 }
 
 //one json-rpc call through the device proxy
