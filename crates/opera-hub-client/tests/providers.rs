@@ -89,7 +89,7 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str) -> Pai
             }
             result => {
                 let paired = result.unwrap();
-                join(data_dir, &client.device_id());
+                join(data_dir, client);
                 return paired;
             }
         }
@@ -98,13 +98,22 @@ async fn pair(client: &HubClient, data_dir: &std::path::Path, name: &str) -> Pai
 }
 
 //binds a device to the first profile
-fn join(data_dir: &std::path::Path, device: &str) {
+fn join(data_dir: &std::path::Path, client: &HubClient) {
     let store = opera_hub::store::Store::new(data_dir);
     let profile = match store.profiles().unwrap().into_iter().next() {
         Some(profile) => profile,
         None => store.create_profile("owner").unwrap(),
     };
-    assert!(store.bind_device(device, &profile.id).unwrap());
+    assert!(store.bind_device(&client.device_id(), &profile.id).unwrap());
+    client
+        .set_profile(profile.id.clone(), test_key(&profile.id))
+        .unwrap();
+}
+
+//devices of one profile share it
+fn test_key(profile: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(&profile.as_bytes()[..32])
 }
 
 async fn http_post(port: u16, path: &str, body: &str) -> String {

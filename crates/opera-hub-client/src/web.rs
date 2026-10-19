@@ -68,6 +68,105 @@ impl WebHubClient {
         self.inner.device_id()
     }
 
+    #[wasm_bindgen(js_name = setProfile)]
+    pub fn set_profile(&self, profile_id: String, key: String) -> Result<(), JsValue> {
+        self.inner.set_profile(profile_id, key).map_err(hub_error)
+    }
+
+    #[wasm_bindgen(js_name = clearProfile)]
+    pub fn clear_profile(&self) {
+        self.inner.clear_profile()
+    }
+
+    #[wasm_bindgen(js_name = profiles)]
+    pub fn profiles(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.profiles(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = createProfile)]
+    pub fn create_profile(
+        &self,
+        hub: JsValue,
+        name: String,
+        password: String,
+    ) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move {
+            inner.create_profile(hub, name, password).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = unlockProfile)]
+    pub fn unlock_profile(
+        &self,
+        hub: JsValue,
+        profile_id: String,
+        password: String,
+    ) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move {
+            inner.unlock_profile(hub, profile_id, password).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = changePassword)]
+    pub fn change_password(
+        &self,
+        hub: JsValue,
+        current: String,
+        new: String,
+    ) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move {
+            inner.change_password(hub, current, new).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = renameProfile)]
+    pub fn rename_profile(&self, hub: JsValue, name: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(
+            async move { inner.rename_profile(hub, name).await },
+        ))
+    }
+
+    #[wasm_bindgen(js_name = linkStart)]
+    pub fn link_start(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_start(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = linkWatch)]
+    pub fn link_watch(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_watch(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = linkApprove)]
+    pub fn link_approve(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_approve(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = linkDeny)]
+    pub fn link_deny(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_deny(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = linkJoin)]
+    pub fn link_join(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_join(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = linkFetch)]
+    pub fn link_fetch(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.link_fetch(hub).await }))
+    }
+
     pub fn pair(&self, link: String, device_name: String, kind: String) -> Promise {
         let inner = self.inner.clone();
         promise(async move { inner.pair(link, device_name, kind, None).await })

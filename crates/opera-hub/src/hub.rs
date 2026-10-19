@@ -10,8 +10,8 @@ use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use opera_hub_proto::{
-    ADMIN_ALPN, HUB_ALPN, MCP_ALPN, MODELS_ALPN, PAIR_ALPN, PING_ALPN, PROVIDERS_ALPN, PairingLink,
-    SECRETS_ALPN, SYNC_ALPN, UNAUTHORIZED, hub_addr,
+    ADMIN_ALPN, HUB_ALPN, MCP_ALPN, MODELS_ALPN, PAIR_ALPN, PING_ALPN, PROFILES_ALPN,
+    PROVIDERS_ALPN, PairingLink, SECRETS_ALPN, SYNC_ALPN, UNAUTHORIZED, hub_addr,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -21,6 +21,7 @@ use crate::db::Db;
 use crate::lan;
 use crate::llama::{Llama, Models};
 use crate::mcp::{Mcp, McpAdmin};
+use crate::profiles::{Links, Profiles};
 use crate::protocols::{Admin, Pair, Ping, Protocol, Session, admit, still_allowed};
 use crate::providers::{Providers, Target, default_targets};
 use crate::secrets::{Secrets, http_client};
@@ -117,6 +118,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let mcp = Mcp::new(data_dir, http.clone(), db.clone());
     mcp.start_installed();
     let name: Arc<str> = config.hub_name().into();
+    let links = Arc::new(Links::default());
     let router = Router::builder(endpoint)
         .accept(PING_ALPN, OverIroh::new(Ping, &store))
         .accept(
@@ -125,6 +127,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Pair {
                     store: store.clone(),
                     name: name.clone(),
+                    links: links.clone(),
                 },
                 &store,
             ),
@@ -146,10 +149,24 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             OverIroh::new(
                 Admin {
                     store: store.clone(),
+                    db: db.clone(),
                     data_dir: data_dir.to_path_buf(),
                     settings: settings.clone(),
                     http: http.clone(),
                     latest,
+                },
+                &store,
+            ),
+        )
+        .accept(
+            PROFILES_ALPN,
+            OverIroh::new(
+                Profiles {
+                    store: store.clone(),
+                    db: db.clone(),
+                    data_dir: data_dir.to_path_buf(),
+                    links,
+                    tries: Default::default(),
                 },
                 &store,
             ),
@@ -269,9 +286,14 @@ pub fn ticket(data_dir: &Path) -> Result<EndpointTicket> {
 }
 
 pub fn pairing_link(data_dir: &Path) -> Result<PairingLink> {
+    pairing_link_for(data_dir, None)
+}
+
+//a link pairing binds once a device approves it
+pub fn pairing_link_for(data_dir: &Path, link: Option<&str>) -> Result<PairingLink> {
     let config = Config::load(data_dir)?;
     let key = config::load_or_create_key(data_dir)?;
-    let secret = Store::new(data_dir).start_pairing()?;
+    let secret = Store::new(data_dir).start_pairing_for(link)?;
     Ok(PairingLink {
         hub: key.public(),
         relays: config.relays,

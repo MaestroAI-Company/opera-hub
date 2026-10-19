@@ -3854,9 +3854,15 @@ name = "opera-hub-client"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "argon2",
+ "base64 0.22.1",
  "bytes",
+ "chacha20poly1305",
+ "curve25519-dalek",
  "futures-util",
  "getrandom 0.4.3",
+ "hkdf",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",

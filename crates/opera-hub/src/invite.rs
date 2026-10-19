@@ -27,8 +27,12 @@ pub struct Invite {
 
 //a fresh pairing secret, reachable by its code too
 pub async fn open(data_dir: &Path) -> Result<Invite> {
+    open_for(data_dir, None).await
+}
+
+pub async fn open_for(data_dir: &Path, device_link: Option<&str>) -> Result<Invite> {
     let config = Config::load(data_dir)?;
-    let link = hub::pairing_link(data_dir)?;
+    let link = hub::pairing_link_for(data_dir, device_link)?;
     let link_text = link.to_string();
     let code = invite::new_code()?;
     //argon2 blocks for a moment

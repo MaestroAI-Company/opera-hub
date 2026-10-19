@@ -5,3 +5,10 @@ members = ["crates/*"]
 [profile.release]
 strip = true
 lto = "thin"
+
+# password hashing stays usable in tests
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

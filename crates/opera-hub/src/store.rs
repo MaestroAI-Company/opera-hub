@@ -36,6 +36,9 @@ pub fn default_scopes(kind: &str) -> Vec<String> {
 struct PendingPairing {
     secret: String,
     expires_at: u64,
+    //a device link waiting for this pairing
+    #[serde(default)]
+    link: Option<String>,
 }
 
 //atomic read modify write
@@ -168,23 +171,40 @@ impl Store {
         Ok(true)
     }
 
-    //only the latest qr code works
+    pub fn rename_profile(&self, id: &str, name: &str) -> Result<bool> {
+        let _guard = self.lock.lock().unwrap();
+        let mut profiles = self.profiles()?;
+        let Some(profile) = profiles.iter_mut().find(|profile| profile.id == id) else {
+            return Ok(false);
+        };
+        profile.name = name.to_string();
+        write_json(&self.dir.join(PROFILES_FILE), &profiles)?;
+        Ok(true)
+    }
+
     pub fn start_pairing(&self) -> Result<String> {
+        self.start_pairing_for(None)
+    }
+
+    //only the latest qr code works
+    pub fn start_pairing_for(&self, link: Option<&str>) -> Result<String> {
         let _guard = self.lock.lock().unwrap();
         let secret = random_hex()?;
         let pending = PendingPairing {
             secret: secret.clone(),
             expires_at: unix_now() + PAIRING_TTL.as_secs(),
+            link: link.map(String::from),
         };
         write_json(&self.dir.join(PAIRING_FILE), &pending)?;
         Ok(secret)
     }
 
+    //the link the device joins, if any
     pub fn finish_pairing(
         &self,
         secret: &str,
         device: Device,
-    ) -> Result<Result<(), PairRejection>> {
+    ) -> Result<Result<Option<String>, PairRejection>> {
         let _guard = self.lock.lock().unwrap();
         let path = self.dir.join(PAIRING_FILE);
         let Some(pending) = read_json::<PendingPairing>(&path)? else {
@@ -206,7 +226,7 @@ impl Store {
         devices.retain(|known| known.id != device.id && !same_machine(known));
         devices.push(device);
         write_json(&self.dir.join(DEVICES_FILE), &devices)?;
-        Ok(Ok(()))
+        Ok(Ok(pending.link))
     }
 }
 
@@ -302,7 +322,10 @@ mod tests {
             store.finish_pairing("wrong", device("a")).unwrap(),
             Err(PairRejection::Invalid)
         );
-        assert_eq!(store.finish_pairing(&secret, device("a")).unwrap(), Ok(()));
+        assert_eq!(
+            store.finish_pairing(&secret, device("a")).unwrap(),
+            Ok(None)
+        );
         assert_eq!(
             store.finish_pairing(&secret, device("b")).unwrap(),
             Err(PairRejection::Invalid)
@@ -342,5 +365,15 @@ mod tests {
         let left: Vec<_> = store.devices().unwrap().into_iter().map(|d| d.id).collect();
         assert_eq!(left, vec!["a"]);
         assert!(!store.remove_profile(&flatmate.id).unwrap());
+    }
+
+    #[test]
+    fn link_pairings_name_their_link() {
+        let store = temp_store();
+        let secret = store.start_pairing_for(Some("link-1")).unwrap();
+        assert_eq!(
+            store.finish_pairing(&secret, device("a")).unwrap(),
+            Ok(Some("link-1".into()))
+        );
     }
 }

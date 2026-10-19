@@ -6,12 +6,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::anyhow;
 use opera_hub_proto::{
-    AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, ProfileRole,
-    SCOPE_ADMIN, clean_device_name, read_frame, write_frame,
+    AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, ProfileInfo,
+    ProfileRole, SCOPE_ADMIN, clean_device_name, read_frame, write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
+use crate::db::Db;
+use crate::profiles::Links;
 use crate::store::{Device, Store, default_scopes, unix_now};
 
 const MAX_DEVICE_NAME: usize = 64;
@@ -116,6 +118,7 @@ impl Protocol for Ping {
 pub struct Pair {
     pub store: Arc<Store>,
     pub name: Arc<str>,
+    pub links: Arc<Links>,
 }
 
 impl Protocol for Pair {
@@ -146,8 +149,12 @@ impl Protocol for Pair {
             profile: None,
         };
         let label = format!("{} ({})", device.name, peer.short());
+        let name = device.name.clone();
         let response = match self.store.finish_pairing(&request.secret, device)? {
-            Ok(()) => {
+            Ok(link) => {
+                if let Some(link) = link {
+                    self.links.attach(&link, &peer.id, &name);
+                }
                 info!("paired {label}");
                 PairResponse::Paired {
                     hub_name: self.name.to_string(),
@@ -243,6 +250,7 @@ impl Session {
 #[derive(Clone)]
 pub struct Admin {
     pub store: Arc<Store>,
+    pub db: Arc<Db>,
     pub data_dir: std::path::PathBuf,
     pub settings: Arc<crate::settings::Settings>,
     pub http: reqwest::Client,
@@ -317,6 +325,25 @@ impl Protocol for Admin {
                         devices: self.store.devices()?,
                     }
                 }
+                AdminRequest::RemoveProfile { id } => match self.remove_profile(&id) {
+                    Ok(profiles) => {
+                        info!(
+                            "{} removed profile {}",
+                            peer.short(),
+                            &id[..id.len().min(10)]
+                        );
+                        AdminResponse::Profiles { profiles }
+                    }
+                    Err(e) => AdminResponse::Error {
+                        message: format!("{e:#}"),
+                    },
+                },
+                AdminRequest::SetRole { id, role } => match self.set_role(&id, role) {
+                    Ok(profiles) => AdminResponse::Profiles { profiles },
+                    Err(e) => AdminResponse::Error {
+                        message: format!("{e:#}"),
+                    },
+                },
                 AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
                     Ok(()) => {
                         info!("{} changed the hub settings", peer.short());
@@ -334,6 +361,31 @@ impl Protocol for Admin {
 }
 
 impl Admin {
+    fn remove_profile(&self, id: &str) -> Result<Vec<ProfileInfo>> {
+        let profiles = self.store.profiles()?;
+        let left: Vec<_> = profiles.iter().filter(|p| p.id != id).cloned().collect();
+        if left.len() == profiles.len() {
+            anyhow::bail!("no such profile");
+        }
+        ensure_admin(&left)?;
+        //data first so nothing stays orphaned
+        self.db.remove_profile(id)?;
+        self.store.remove_profile(id)?;
+        self.store.profiles()
+    }
+
+    fn set_role(&self, id: &str, role: ProfileRole) -> Result<Vec<ProfileInfo>> {
+        let mut profiles = self.store.profiles()?;
+        let profile = profiles
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| anyhow!("no such profile"))?;
+        profile.role = role;
+        ensure_admin(&profiles)?;
+        self.store.set_role(id, role)?;
+        self.store.profiles()
+    }
+
     async fn update(&self) -> Result<String> {
         //the guard must not live across an await
         let known = self.latest.borrow().clone();
@@ -346,6 +398,14 @@ impl Admin {
         crate::update::apply(&self.http, &version).await?;
         Ok(version)
     }
+}
+
+//someone must keep managing the hub
+fn ensure_admin(profiles: &[ProfileInfo]) -> Result<()> {
+    if !profiles.is_empty() && !profiles.iter().any(|p| p.role == ProfileRole::Admin) {
+        anyhow::bail!("the hub needs at least one admin profile");
+    }
+    Ok(())
 }
 
 //windows installers restart the hub themselves

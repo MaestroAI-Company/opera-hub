@@ -19,6 +19,7 @@ pub const PROVIDERS_ALPN: &[u8] = b"opera/providers/1";
 pub const SYNC_ALPN: &[u8] = b"opera/sync/2";
 pub const MODELS_ALPN: &[u8] = b"opera/models/1";
 pub const MCP_ALPN: &[u8] = b"opera/mcp/1";
+pub const PROFILES_ALPN: &[u8] = b"opera/profiles/1";
 
 //provider configs with their keys and tokens
 pub const COLLECTION_PROVIDERS: &str = "providers";
@@ -135,6 +136,9 @@ pub enum AdminRequest {
     RenameDevice { id: String, name: String },
     //its open connections close at once
     RemoveDevice { id: String },
+    //with its data, devices and servers
+    RemoveProfile { id: String },
+    SetRole { id: String, role: ProfileRole },
 }
 
 //cpu share of the machine, memory in bytes
@@ -170,6 +174,7 @@ pub enum AdminResponse {
     Settings { settings: HubSettings },
     Updating { version: String },
     Devices { devices: Vec<DeviceInfo> },
+    Profiles { profiles: Vec<ProfileInfo> },
     Error { message: String },
 }
 
@@ -205,6 +210,115 @@ pub struct ProfileInfo {
 pub enum ProfileRole {
     Admin,
     Member,
+}
+
+//profile key the hub cannot open
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedKey {
+    //argon2id inputs
+    pub salt: String,
+    pub memory_kib: u32,
+    pub passes: u32,
+    //key sealed by the password
+    pub wrapped: String,
+}
+
+//paired devices pick, create or link a profile
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProfileRequest {
+    List,
+    //what the password needs before unlocking
+    Cost {
+        profile: String,
+    },
+    Create {
+        name: String,
+        locked: LockedKey,
+        auth_hash: String,
+    },
+    Unlock {
+        profile: String,
+        auth_key: String,
+    },
+    ChangePassword {
+        auth_key: String,
+        locked: LockedKey,
+        auth_hash: String,
+    },
+    Rename {
+        name: String,
+    },
+    //a device of the profile shows a code
+    LinkStart {
+        commitment: String,
+    },
+    LinkWatch,
+    LinkReveal {
+        public: String,
+    },
+    LinkApprove {
+        sealed: String,
+    },
+    LinkDeny,
+    //the device that typed the code
+    LinkJoin {
+        public: String,
+    },
+    LinkFetch,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProfileResponse {
+    Profiles {
+        profiles: Vec<ProfileInfo>,
+    },
+    Cost {
+        salt: String,
+        memory_kib: u32,
+        passes: u32,
+    },
+    Profile {
+        profile: ProfileInfo,
+    },
+    Unlocked {
+        profile: ProfileInfo,
+        locked: LockedKey,
+    },
+    Done,
+    Code {
+        code: String,
+        link: String,
+    },
+    //nothing new before the timeout
+    Waiting,
+    Joining {
+        device: String,
+        public: String,
+    },
+    Joined {
+        commitment: String,
+    },
+    Link {
+        public: Option<String>,
+        sealed: Option<String>,
+        //sent with the sealed key
+        profile: Option<ProfileInfo>,
+        denied: bool,
+    },
+    Error {
+        message: String,
+    },
+}
+
+//hub keeps only this hash
+pub fn auth_hash(auth_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"opera-profile-auth-1");
+    hash.update(auth_key.as_bytes());
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 //last writer wins on updated_at then device

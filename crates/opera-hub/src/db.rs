@@ -7,8 +7,9 @@ use tokio::sync::watch;
 use anyhow::{Context, Result, anyhow, bail};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use opera_hub_proto::{OAuthGrant, Record};
+use opera_hub_proto::{LockedKey, OAuthGrant, Record};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 const DB_FILE: &str = "hub.db";
 const KEY_FILE: &str = "data.key";
@@ -17,6 +18,13 @@ const NONCE_BYTES: usize = 24;
 const SCHEMA_VERSION: u32 = 1;
 //keeps a pull page well under the frame limit
 const PULL_BYTES: usize = 2 * 1024 * 1024;
+
+//what a password must match to unlock
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileKey {
+    pub locked: LockedKey,
+    pub auth_hash: String,
+}
 
 //contents sealed per row
 pub struct Db {
@@ -65,6 +73,10 @@ impl Db {
                 server_id TEXT NOT NULL,
                 grant BLOB NOT NULL,
                 PRIMARY KEY (profile, server_id)
+            );
+            CREATE TABLE IF NOT EXISTS profile_keys (
+                profile TEXT PRIMARY KEY,
+                keys BLOB NOT NULL
             );
             CREATE TABLE IF NOT EXISTS mcp_secrets (
                 server TEXT PRIMARY KEY,
@@ -115,11 +127,12 @@ impl Db {
                 tx.query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM records", [], |row| {
                     row.get(0)
                 })?;
-            let payload = match (&record.payload, record.deleted) {
-                (Some(payload), false) => {
+            //sealed tombstones keep their payload
+            let payload = match &record.payload {
+                Some(payload) => {
                     Some(self.seal(&aad(&[profile, collection, &record.id]), payload.as_bytes())?)
                 }
-                _ => None,
+                None => None,
             };
             tx.execute(
                 "INSERT OR REPLACE INTO records (profile, collection, id, seq, updated_at, device, deleted, payload)
@@ -201,7 +214,39 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM records WHERE profile = ?1", params![profile])?;
         conn.execute("DELETE FROM grants WHERE profile = ?1", params![profile])?;
+        conn.execute(
+            "DELETE FROM profile_keys WHERE profile = ?1",
+            params![profile],
+        )?;
         Ok(())
+    }
+
+    pub fn put_profile_key(&self, profile: &str, key: &ProfileKey) -> Result<()> {
+        let sealed = self.seal(&aad(&["profile_keys", profile]), &serde_json::to_vec(key)?)?;
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO profile_keys (profile, keys) VALUES (?1, ?2)",
+            params![profile, sealed],
+        )?;
+        Ok(())
+    }
+
+    pub fn profile_key(&self, profile: &str) -> Result<Option<ProfileKey>> {
+        let sealed: Option<Vec<u8>> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT keys FROM profile_keys WHERE profile = ?1",
+                params![profile],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match sealed {
+            Some(sealed) => Ok(Some(serde_json::from_slice(
+                &self.unseal(&aad(&["profile_keys", profile]), &sealed)?,
+            )?)),
+            None => Ok(None),
+        }
     }
 
     pub fn put_grant(&self, profile: &str, grant: &OAuthGrant) -> Result<()> {

@@ -2,6 +2,7 @@ mod mcp;
 pub use mcp::*;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod lan;
+mod profile;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod proxy;
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
@@ -18,11 +19,11 @@ use opera_hub_proto::HubSettings as ProtoSettings;
 use opera_hub_proto::invite::{self, INVITE_ALPN, InviteRequest, InviteResponse};
 use opera_hub_proto::{
     ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
-    MODELS_ALPN, ModelsRequest, ModelsResponse, OAuthGrant, PAIR_ALPN, PROVIDERS_ALPN,
-    PairRejection, PairRequest, PairResponse, PairingLink, ProvidersRequest, ProvidersResponse,
-    Record, SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse,
-    SyncRequest, SyncResponse, UNAUTHORIZED, hub_addr, machine_tag, read_frame, request,
-    write_frame,
+    MODELS_ALPN, ModelsRequest, ModelsResponse, OAuthGrant, PAIR_ALPN, PROFILES_ALPN,
+    PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink, ProfileInfo,
+    ProfileRequest, ProfileResponse, ProfileRole, ProvidersRequest, ProvidersResponse, Record,
+    SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse, SyncRequest,
+    SyncResponse, UNAUTHORIZED, auth_hash, hub_addr, machine_tag, read_frame, request, write_frame,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -60,6 +61,8 @@ pub enum HubError {
     Unreachable(String),
     #[error("the hub is too old for this app, update it")]
     Outdated,
+    #[error("no profile is unlocked on this device")]
+    Locked,
     #[error("{0}")]
     Internal(String),
 }
@@ -75,6 +78,7 @@ impl Serialize for HubError {
             HubError::Unauthorized => "Unauthorized",
             HubError::Unreachable(_) => "Unreachable",
             HubError::Outdated => "Outdated",
+            HubError::Locked => "Locked",
             HubError::Internal(_) => "Internal",
         };
         let mut error = serializer.serialize_struct("HubError", 2)?;
@@ -310,6 +314,57 @@ pub struct HubProvider {
     derive(uniffi::Record)
 )]
 #[serde(rename_all = "camelCase")]
+pub struct HubProfile {
+    pub id: String,
+    pub name: String,
+    //admin or member
+    pub role: String,
+    pub created_at: u64,
+}
+
+//the app keeps the key securely
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockedProfile {
+    pub profile: HubProfile,
+    pub key: String,
+}
+
+//compare these digits before approving
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkJoining {
+    pub device: String,
+    pub digits: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkProgress {
+    //shown once the other device answered
+    pub digits: Option<String>,
+    pub profile: Option<UnlockedProfile>,
+    pub denied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyInfo {
     pub port: u16,
     pub token: String,
@@ -330,6 +385,22 @@ pub struct HubClient {
     //addresses found on the local network
     #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     lan: std::sync::Mutex<HashMap<String, Vec<std::net::SocketAddr>>>,
+    //seals what this device syncs
+    profile: std::sync::Mutex<Option<Unlocked>>,
+    //one device link at a time
+    link: Mutex<Option<LinkSession>>,
+}
+
+struct LinkSession {
+    keys: profile::LinkKeys,
+    //joiner key or approver commitment
+    other: Option<String>,
+}
+
+#[derive(Clone)]
+struct Unlocked {
+    id: String,
+    key: profile::Key,
 }
 
 #[cfg_attr(
@@ -354,7 +425,265 @@ impl HubClient {
             proxy: Mutex::new(None),
             #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             lan: Default::default(),
+            profile: Default::default(),
+            link: Mutex::new(None),
         }))
+    }
+
+    //key comes from the secure store
+    pub fn set_profile(&self, profile_id: String, key: String) -> Result<(), HubError> {
+        let key = profile::decode_key(&key).map_err(internal)?;
+        *self.profile.lock().unwrap() = Some(Unlocked {
+            id: profile_id,
+            key,
+        });
+        Ok(())
+    }
+
+    pub fn clear_profile(&self) {
+        *self.profile.lock().unwrap() = None;
+    }
+
+    pub async fn profiles(&self, hub: PairedHub) -> Result<Vec<HubProfile>, HubError> {
+        match self.profile_request(&hub, ProfileRequest::List).await? {
+            ProfileResponse::Profiles { profiles } => {
+                Ok(profiles.into_iter().map(hub_profile).collect())
+            }
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    //the key never leaves unsealed
+    pub async fn create_profile(
+        &self,
+        hub: PairedHub,
+        name: String,
+        password: String,
+    ) -> Result<UnlockedProfile, HubError> {
+        let key = profile::new_key().map_err(internal)?;
+        let (locked, auth_key) =
+            blocking(move || profile::lock(&key, &password, profile::MEMORY_KIB, profile::PASSES))
+                .await?;
+        let request = ProfileRequest::Create {
+            name,
+            locked,
+            auth_hash: auth_hash(&auth_key),
+        };
+        match self.profile_request(&hub, request).await? {
+            ProfileResponse::Profile { profile } => self.unlocked_with(profile, key),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn unlock_profile(
+        &self,
+        hub: PairedHub,
+        profile_id: String,
+        password: String,
+    ) -> Result<UnlockedProfile, HubError> {
+        let derived = self.derive(&hub, &profile_id, password).await?;
+        let request = ProfileRequest::Unlock {
+            profile: profile_id,
+            auth_key: derived.auth_key.clone(),
+        };
+        match self.profile_request(&hub, request).await? {
+            ProfileResponse::Unlocked { profile, locked } => {
+                let key = profile::unlock(&derived, &locked).map_err(internal)?;
+                self.unlocked_with(profile, key)
+            }
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn change_password(
+        &self,
+        hub: PairedHub,
+        current: String,
+        new: String,
+    ) -> Result<(), HubError> {
+        let unlocked = self.unlocked()?;
+        let derived = self.derive(&hub, &unlocked.id, current).await?;
+        let (locked, auth_key) = blocking(move || {
+            profile::lock(&unlocked.key, &new, profile::MEMORY_KIB, profile::PASSES)
+        })
+        .await?;
+        let request = ProfileRequest::ChangePassword {
+            auth_key: derived.auth_key,
+            locked,
+            auth_hash: auth_hash(&auth_key),
+        };
+        match self.profile_request(&hub, request).await? {
+            ProfileResponse::Done => Ok(()),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn rename_profile(
+        &self,
+        hub: PairedHub,
+        name: String,
+    ) -> Result<HubProfile, HubError> {
+        match self
+            .profile_request(&hub, ProfileRequest::Rename { name })
+            .await?
+        {
+            ProfileResponse::Profile { profile } => Ok(hub_profile(profile)),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    //a code for another device of this profile
+    pub async fn link_start(&self, hub: PairedHub) -> Result<HubInvite, HubError> {
+        self.unlocked()?;
+        let keys = profile::LinkKeys::new().map_err(internal)?;
+        let request = ProfileRequest::LinkStart {
+            commitment: keys.commitment(),
+        };
+        match self.profile_request(&hub, request).await? {
+            ProfileResponse::Code { code, link } => {
+                *self.link.lock().await = Some(LinkSession { keys, other: None });
+                Ok(HubInvite { code, link })
+            }
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    //none until a device typed the code
+    pub async fn link_watch(&self, hub: PairedHub) -> Result<Option<LinkJoining>, HubError> {
+        let mut link = self.link.lock().await;
+        let session = link
+            .as_mut()
+            .ok_or_else(|| HubError::Internal("no link in progress".into()))?;
+        match self
+            .profile_request(&hub, ProfileRequest::LinkWatch)
+            .await?
+        {
+            ProfileResponse::Waiting => Ok(None),
+            ProfileResponse::Joining { device, public } => {
+                let request = ProfileRequest::LinkReveal {
+                    public: session.keys.public.clone(),
+                };
+                match self.profile_request(&hub, request).await? {
+                    ProfileResponse::Done => {}
+                    other => return Err(unexpected_profile(other)),
+                }
+                let digits = profile::link_digits(&session.keys.public, &public);
+                session.other = Some(public);
+                Ok(Some(LinkJoining { device, digits }))
+            }
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn link_approve(&self, hub: PairedHub) -> Result<(), HubError> {
+        let key = self.unlocked()?.key;
+        let session = self
+            .link
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| HubError::Internal("no link in progress".into()))?;
+        let joiner = session
+            .other
+            .ok_or_else(|| HubError::Internal("no device is waiting".into()))?;
+        let sealed = session.keys.seal_for(&joiner, &key).map_err(internal)?;
+        match self
+            .profile_request(&hub, ProfileRequest::LinkApprove { sealed })
+            .await?
+        {
+            ProfileResponse::Done => Ok(()),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn link_deny(&self, hub: PairedHub) -> Result<(), HubError> {
+        self.link.lock().await.take();
+        match self.profile_request(&hub, ProfileRequest::LinkDeny).await? {
+            ProfileResponse::Done => Ok(()),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    //right after pairing with a link code
+    pub async fn link_join(&self, hub: PairedHub) -> Result<(), HubError> {
+        let keys = profile::LinkKeys::new().map_err(internal)?;
+        let request = ProfileRequest::LinkJoin {
+            public: keys.public.clone(),
+        };
+        match self.profile_request(&hub, request).await? {
+            ProfileResponse::Joined { commitment } => {
+                *self.link.lock().await = Some(LinkSession {
+                    keys,
+                    other: Some(commitment),
+                });
+                Ok(())
+            }
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    pub async fn link_fetch(&self, hub: PairedHub) -> Result<LinkProgress, HubError> {
+        let mut link = self.link.lock().await;
+        let session = link
+            .as_ref()
+            .ok_or_else(|| HubError::Internal("no link in progress".into()))?;
+        let ProfileResponse::Link {
+            public,
+            sealed,
+            profile: info,
+            denied,
+        } = self
+            .profile_request(&hub, ProfileRequest::LinkFetch)
+            .await?
+        else {
+            return Err(HubError::Internal("unexpected answer to a link".into()));
+        };
+        let digits = match &public {
+            //a relay swapping keys breaks the commitment
+            Some(public) if session.other.as_deref() != Some(&profile::commitment(public)) => {
+                link.take();
+                return Err(HubError::Internal("the link was tampered with".into()));
+            }
+            Some(public) => Some(profile::link_digits(public, &session.keys.public)),
+            None => None,
+        };
+        let unlocked = match (public, sealed, info) {
+            (Some(public), Some(sealed), Some(info)) => {
+                let key = session.keys.open_from(&public, &sealed).map_err(internal)?;
+                link.take();
+                Some(self.unlocked_with(info, key)?)
+            }
+            _ => None,
+        };
+        if denied {
+            link.take();
+        }
+        Ok(LinkProgress {
+            digits,
+            profile: unlocked,
+            denied,
+        })
+    }
+
+    //admin only, removes data and devices
+    pub async fn remove_profile(&self, hub: PairedHub, id: String) -> Result<(), HubError> {
+        self.admin_profiles(&hub, AdminRequest::RemoveProfile { id })
+            .await
+    }
+
+    pub async fn set_profile_role(
+        &self,
+        hub: PairedHub,
+        id: String,
+        role: String,
+    ) -> Result<(), HubError> {
+        let role = match role.as_str() {
+            "admin" => ProfileRole::Admin,
+            "member" => ProfileRole::Member,
+            other => return Err(HubError::Internal(format!("unknown role {other}"))),
+        };
+        self.admin_profiles(&hub, AdminRequest::SetRole { id, role })
+            .await
     }
 
     //the id the hub lists for this device
@@ -673,15 +1002,20 @@ impl HubClient {
         collection: String,
         records: Vec<SyncRecord>,
     ) -> Result<(), HubError> {
+        let unlocked = self.unlocked()?;
         let records = records
             .into_iter()
-            .map(|r| Record {
-                id: r.id,
-                updated_at: r.updated_at,
-                deleted: r.deleted,
-                payload: r.payload,
+            .map(|r| {
+                let record = Record {
+                    id: r.id,
+                    updated_at: r.updated_at,
+                    deleted: r.deleted,
+                    payload: r.payload,
+                };
+                profile::seal_record(&unlocked.key, &unlocked.id, &collection, record)
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()
+            .map_err(internal)?;
         //provider secrets need their own scope
         if SECRET_COLLECTIONS.contains(&collection.as_str()) {
             let request = SecretsRequest::Push {
@@ -709,6 +1043,8 @@ impl HubClient {
         collection: String,
         since: u64,
     ) -> Result<PullPage, HubError> {
+        let unlocked = self.unlocked()?;
+        let name = collection.clone();
         let (records, cursor, more) = if SECRET_COLLECTIONS.contains(&collection.as_str()) {
             match self
                 .secrets(&hub, SecretsRequest::Pull { collection, since })
@@ -734,16 +1070,21 @@ impl HubClient {
                 other => return Err(HubError::Internal(format!("unexpected answer {other:?}"))),
             }
         };
-        Ok(PullPage {
-            records: records
-                .into_iter()
-                .map(|r| SyncRecord {
+        let records = records
+            .into_iter()
+            .map(|record| {
+                let r = profile::open_record(&unlocked.key, &unlocked.id, &name, record)?;
+                Ok(SyncRecord {
                     id: r.id,
                     updated_at: r.updated_at,
                     deleted: r.deleted,
                     payload: r.payload,
                 })
-                .collect(),
+            })
+            .collect::<anyhow::Result<_>>()
+            .map_err(internal)?;
+        Ok(PullPage {
+            records,
             cursor,
             more,
         })
@@ -834,6 +1175,70 @@ impl HubClient {
 }
 
 impl HubClient {
+    fn unlocked(&self) -> Result<Unlocked, HubError> {
+        self.profile.lock().unwrap().clone().ok_or(HubError::Locked)
+    }
+
+    fn unlocked_with(
+        &self,
+        profile: ProfileInfo,
+        key: profile::Key,
+    ) -> Result<UnlockedProfile, HubError> {
+        *self.profile.lock().unwrap() = Some(Unlocked {
+            id: profile.id.clone(),
+            key,
+        });
+        Ok(UnlockedProfile {
+            profile: hub_profile(profile),
+            key: profile::encode_key(&key),
+        })
+    }
+
+    async fn derive(
+        &self,
+        hub: &PairedHub,
+        profile: &str,
+        password: String,
+    ) -> Result<profile::Derived, HubError> {
+        let request = ProfileRequest::Cost {
+            profile: profile.to_string(),
+        };
+        let ProfileResponse::Cost {
+            salt,
+            memory_kib,
+            passes,
+        } = self.profile_request(hub, request).await?
+        else {
+            return Err(HubError::Internal("unexpected answer to a cost".into()));
+        };
+        blocking(move || profile::derive(&password, &salt, memory_kib, passes)).await
+    }
+
+    async fn profile_request(
+        &self,
+        hub: &PairedHub,
+        request: ProfileRequest,
+    ) -> Result<ProfileResponse, HubError> {
+        let mut stream = self.stream(hub, PROFILES_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            ProfileResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Ok(other),
+        }
+    }
+
+    async fn admin_profiles(&self, hub: &PairedHub, request: AdminRequest) -> Result<(), HubError> {
+        let mut stream = self.stream(hub, ADMIN_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            AdminResponse::Profiles { .. } => Ok(()),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     async fn endpoint(&self) -> Result<&Endpoint, HubError> {
         self.endpoint
             .get_or_try_init(|| async {
@@ -1123,6 +1528,43 @@ fn paired_addr(hub: &PairedHub) -> Result<EndpointAddr, HubError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| HubError::Internal("invalid relay url".into()))?;
     Ok(hub_addr(id, &relays))
+}
+
+fn internal(e: anyhow::Error) -> HubError {
+    HubError::Internal(format!("{e:#}"))
+}
+
+fn unexpected_profile(response: ProfileResponse) -> HubError {
+    HubError::Internal(format!("unexpected answer {response:?}"))
+}
+
+fn hub_profile(profile: ProfileInfo) -> HubProfile {
+    HubProfile {
+        id: profile.id,
+        name: profile.name,
+        role: match profile.role {
+            ProfileRole::Admin => "admin".into(),
+            ProfileRole::Member => "member".into(),
+        },
+        created_at: profile.created_at,
+    }
+}
+
+//argon2 must not block the async runtime
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, HubError> {
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    {
+        tokio::task::spawn_blocking(work)
+            .await
+            .map_err(|e| HubError::Internal(e.to_string()))?
+            .map_err(internal)
+    }
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    {
+        work().map_err(internal)
+    }
 }
 
 fn unexpected(response: SecretsResponse) -> HubError {
