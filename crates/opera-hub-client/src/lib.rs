@@ -1104,6 +1104,21 @@ impl HubClient {
         }
     }
 
+    //false while another device of the profile holds it
+    pub async fn lease(&self, hub: PairedHub, name: String) -> Result<bool, HubError> {
+        match self.secrets(&hub, SecretsRequest::Lease { name }).await? {
+            SecretsResponse::Lease { granted } => Ok(granted),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub async fn release(&self, hub: PairedHub, name: String) -> Result<(), HubError> {
+        match self.secrets(&hub, SecretsRequest::Release { name }).await? {
+            SecretsResponse::Released => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn providers(&self, hub: PairedHub) -> Result<Vec<HubProvider>, HubError> {
         let mut stream = self.stream(&hub, PROVIDERS_ALPN).await?;
         let response = stream.request(&ProvidersRequest::List).await?;

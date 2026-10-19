@@ -350,6 +350,13 @@ pub enum SecretsRequest {
         collection: String,
         since: u64,
     },
+    //one device of the profile refreshes a token at a time
+    Lease {
+        name: String,
+    },
+    Release {
+        name: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -361,6 +368,10 @@ pub enum SecretsResponse {
         cursor: u64,
         more: bool,
     },
+    Lease {
+        granted: bool,
+    },
+    Released,
     Error {
         message: String,
     },

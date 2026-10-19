@@ -188,6 +188,16 @@ async fn providers_and_secrets() {
         .unwrap();
     assert_eq!(page.records.len(), 1);
     assert_eq!(page.records[0].payload.as_deref(), Some("new"));
+    //one device of the profile refreshes at a time
+    let name = "oauth:mcp".to_string();
+    assert!(phone.lease(hub_ref.clone(), name.clone()).await.unwrap());
+    assert!(!laptop.lease(hub_ref.clone(), name.clone()).await.unwrap());
+    assert!(phone.lease(hub_ref.clone(), name.clone()).await.unwrap());
+    laptop.release(hub_ref.clone(), name.clone()).await.unwrap();
+    assert!(!laptop.lease(hub_ref.clone(), name.clone()).await.unwrap());
+    phone.release(hub_ref.clone(), name.clone()).await.unwrap();
+    assert!(laptop.lease(hub_ref.clone(), name).await.unwrap());
+
     let unknown = phone.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");
 

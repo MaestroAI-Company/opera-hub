@@ -189,7 +189,16 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             SYNC_ALPN,
             OverIroh::new(DataSync { db: db.clone() }, &store),
         )
-        .accept(SECRETS_ALPN, OverIroh::new(Secrets { db }, &store))
+        .accept(
+            SECRETS_ALPN,
+            OverIroh::new(
+                Secrets {
+                    db,
+                    leases: Default::default(),
+                },
+                &store,
+            ),
+        )
         .accept(
             PROVIDERS_ALPN,
             OverIroh::new(

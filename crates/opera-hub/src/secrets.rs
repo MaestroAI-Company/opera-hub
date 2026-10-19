@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use opera_hub_proto::{
@@ -11,6 +12,8 @@ use crate::db::Db;
 use crate::protocols::{Access, Peer, Protocol};
 
 const PULL_LIMIT: usize = 200;
+//long enough for a token refresh, short if a device dies
+const LEASE_TTL: Duration = Duration::from_secs(30);
 
 pub fn http_client() -> Result<reqwest::Client> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -27,10 +30,15 @@ pub fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+//profile and lock name, holding device and expiry
+pub type Leases = Arc<Mutex<HashMap<(String, String), (String, Instant)>>>;
+
 //provider configs, sealed by each profile
 #[derive(Clone)]
 pub struct Secrets {
     pub db: Arc<Db>,
+    //the hub only locks, it never sees the token
+    pub leases: Leases,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -82,6 +90,31 @@ impl Secrets {
                     cursor,
                     more,
                 }
+            }
+            SecretsRequest::Lease { name } => {
+                let key = (peer.profile()?.to_string(), name);
+                let mut leases = self.leases.lock().unwrap();
+                let now = Instant::now();
+                leases.retain(|_, (_, until)| *until > now);
+                let granted = match leases.get(&key) {
+                    Some((holder, _)) => *holder == peer.id,
+                    None => true,
+                };
+                if granted {
+                    leases.insert(key, (peer.id.clone(), now + LEASE_TTL));
+                }
+                SecretsResponse::Lease { granted }
+            }
+            SecretsRequest::Release { name } => {
+                let key = (peer.profile()?.to_string(), name);
+                let mut leases = self.leases.lock().unwrap();
+                if leases
+                    .get(&key)
+                    .is_some_and(|(holder, _)| *holder == peer.id)
+                {
+                    leases.remove(&key);
+                }
+                SecretsResponse::Released
             }
         })
     }

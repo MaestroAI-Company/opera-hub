@@ -248,6 +248,16 @@ impl WebHubClient {
         Ok(promise(async move { inner.watch(hub, since as u64).await }))
     }
 
+    pub fn lease(&self, hub: JsValue, name: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.lease(hub, name).await }))
+    }
+
+    pub fn release(&self, hub: JsValue, name: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.release(hub, name).await }))
+    }
+
     pub fn providers(&self, hub: JsValue) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
         Ok(promise(async move { inner.providers(hub).await }))
