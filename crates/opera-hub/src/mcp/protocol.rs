@@ -1,8 +1,9 @@
-//opera/mcp/1, admins manage hosted servers
+//opera/mcp/1, members manage their servers
 use std::sync::Arc;
 
 use anyhow::Result;
-use opera_hub_proto::{McpRequest, McpResponse, SCOPE_ADMIN, read_frame, write_frame};
+use anyhow::ensure;
+use opera_hub_proto::{McpRequest, McpResponse, SCOPE_MCP, read_frame, write_frame};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::Mcp;
@@ -14,9 +15,9 @@ pub struct McpAdmin {
 }
 
 impl Protocol for McpAdmin {
-    const ACCESS: Access = Access::Scope(SCOPE_ADMIN);
+    const ACCESS: Access = Access::Scope(SCOPE_MCP);
 
-    async fn serve<R, W>(&self, _peer: Peer, mut reader: R, mut writer: W) -> Result<()>
+    async fn serve<R, W>(&self, peer: Peer, mut reader: R, mut writer: W) -> Result<()>
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
@@ -25,7 +26,7 @@ impl Protocol for McpAdmin {
             return Ok(());
         };
         let response = self
-            .handle(request)
+            .handle(peer.profile()?, request)
             .await
             .unwrap_or_else(|e| McpResponse::Error {
                 message: format!("{e:#}"),
@@ -35,12 +36,12 @@ impl Protocol for McpAdmin {
 }
 
 impl McpAdmin {
-    async fn handle(&self, request: McpRequest) -> Result<McpResponse> {
+    async fn handle(&self, owner: &str, request: McpRequest) -> Result<McpResponse> {
         let mcp = &self.mcp;
         let status = || -> Result<McpResponse> {
             Ok(McpResponse::Status {
                 isolation: mcp.isolation().into(),
-                servers: mcp.status()?,
+                servers: mcp.status(owner)?,
             })
         };
         Ok(match request {
@@ -54,34 +55,34 @@ impl McpAdmin {
                 listing: Box::new(mcp.prepare(listing).await?),
             },
             McpRequest::Install { listing, values } => McpResponse::Installed {
-                id: mcp.install(listing, values)?,
+                id: mcp.install(owner, listing, values)?,
             },
             McpRequest::Configure { id, values } => {
-                mcp.configure(&id, values)?;
+                mcp.configure(owner, &id, values)?;
                 status()?
             }
             McpRequest::Enable { id, on } => {
-                mcp.enable(&id, on)?;
+                mcp.enable(owner, &id, on)?;
                 status()?
             }
             McpRequest::Restart { id } => {
-                mcp.restart(&id)?;
+                mcp.restart(owner, &id)?;
                 status()?
             }
             McpRequest::Update { id } => {
-                mcp.update(&id).await?;
+                mcp.update(owner, &id).await?;
                 status()?
             }
             McpRequest::Remove { id } => {
-                mcp.remove(&id).await?;
+                mcp.remove(owner, &id).await?;
                 status()?
             }
             McpRequest::Status => status()?,
             McpRequest::Logs { id } => McpResponse::Logs {
-                lines: mcp.logs(&id)?,
+                lines: mcp.logs(owner, &id)?,
             },
             McpRequest::Folders { path } => {
-                let (path, parent, folders) = mcp.folders(path.as_deref())?;
+                let (path, parent, folders) = mcp.folders(owner, path.as_deref())?;
                 McpResponse::Folders {
                     path,
                     parent,
@@ -92,6 +93,7 @@ impl McpAdmin {
                 urls: mcp.registries(),
             },
             McpRequest::SetRegistries { urls } => {
+                ensure!(mcp.is_admin(owner), "only an admin changes the registries");
                 mcp.set_registries(urls)?;
                 McpResponse::Registries {
                     urls: mcp.registries(),

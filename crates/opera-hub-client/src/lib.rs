@@ -19,11 +19,11 @@ use opera_hub_proto::HubSettings as ProtoSettings;
 use opera_hub_proto::invite::{self, INVITE_ALPN, InviteRequest, InviteResponse};
 use opera_hub_proto::{
     ADMIN_ALPN, AdminRequest, AdminResponse, ForwardHead, HUB_ALPN, HubRequest, HubResponse,
-    MODELS_ALPN, ModelsRequest, ModelsResponse, OAuthGrant, PAIR_ALPN, PROFILES_ALPN,
-    PROVIDERS_ALPN, PairRejection, PairRequest, PairResponse, PairingLink, ProfileInfo,
-    ProfileRequest, ProfileResponse, ProfileRole, ProvidersRequest, ProvidersResponse, Record,
-    SECRET_COLLECTIONS, SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse, SyncRequest,
-    SyncResponse, UNAUTHORIZED, auth_hash, hub_addr, machine_tag, read_frame, request, write_frame,
+    MODELS_ALPN, ModelsRequest, ModelsResponse, PAIR_ALPN, PROFILES_ALPN, PROVIDERS_ALPN,
+    PairRejection, PairRequest, PairResponse, PairingLink, ProfileInfo, ProfileRequest,
+    ProfileResponse, ProfileRole, ProvidersRequest, ProvidersResponse, Record, SECRET_COLLECTIONS,
+    SECRETS_ALPN, SYNC_ALPN, SecretsRequest, SecretsResponse, SyncRequest, SyncResponse,
+    UNAUTHORIZED, auth_hash, hub_addr, machine_tag, read_frame, request, write_frame,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -268,32 +268,6 @@ pub struct PullPage {
     pub records: Vec<SyncRecord>,
     pub cursor: u64,
     pub more: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    not(all(target_family = "wasm", target_os = "unknown")),
-    derive(uniffi::Record)
-)]
-#[serde(rename_all = "camelCase")]
-pub struct McpGrant {
-    pub server_id: String,
-    pub token_endpoint: String,
-    pub client_id: String,
-    pub refresh_token: String,
-    pub access_token: Option<String>,
-    pub expires_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(
-    not(all(target_family = "wasm", target_os = "unknown")),
-    derive(uniffi::Record)
-)]
-#[serde(rename_all = "camelCase")]
-pub struct McpAccessToken {
-    pub access_token: String,
-    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1095,52 +1069,6 @@ impl HubClient {
         match self.data(&hub, SyncRequest::Watch { since }).await? {
             SyncResponse::Changed { cursor } => Ok(cursor),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
-        }
-    }
-
-    pub async fn put_grant(&self, hub: PairedHub, grant: McpGrant) -> Result<(), HubError> {
-        let grant = OAuthGrant {
-            server_id: grant.server_id,
-            token_endpoint: grant.token_endpoint,
-            client_id: grant.client_id,
-            refresh_token: grant.refresh_token,
-            access_token: grant.access_token,
-            expires_at: grant.expires_at,
-        };
-        match self
-            .secrets(&hub, SecretsRequest::PutGrant { grant })
-            .await?
-        {
-            SecretsResponse::GrantSaved => Ok(()),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    //none means signing in again
-    pub async fn access_token(
-        &self,
-        hub: PairedHub,
-        server_id: String,
-    ) -> Result<Option<McpAccessToken>, HubError> {
-        match self
-            .secrets(&hub, SecretsRequest::AccessToken { server_id })
-            .await?
-        {
-            SecretsResponse::AccessToken { token } => Ok(token.map(|t| McpAccessToken {
-                access_token: t.access_token,
-                expires_at: t.expires_at,
-            })),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    pub async fn drop_grant(&self, hub: PairedHub, server_id: String) -> Result<(), HubError> {
-        match self
-            .secrets(&hub, SecretsRequest::DropGrant { server_id })
-            .await?
-        {
-            SecretsResponse::GrantDropped => Ok(()),
-            other => Err(unexpected(other)),
         }
     }
 

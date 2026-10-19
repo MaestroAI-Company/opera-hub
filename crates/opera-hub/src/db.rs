@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use anyhow::{Context, Result, anyhow, bail};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use opera_hub_proto::{LockedKey, OAuthGrant, Record};
+use opera_hub_proto::{LockedKey, Record};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +51,7 @@ impl Db {
         if version < SCHEMA_VERSION {
             conn.execute_batch(
                 "DROP INDEX IF EXISTS records_seq;
-                DROP TABLE IF EXISTS records;
-                DROP TABLE IF EXISTS grants;",
+                DROP TABLE IF EXISTS records;",
             )?;
         }
         conn.execute_batch(&format!(
@@ -68,12 +67,6 @@ impl Db {
                 PRIMARY KEY (profile, collection, id)
             );
             CREATE INDEX IF NOT EXISTS records_seq ON records (profile, collection, seq);
-            CREATE TABLE IF NOT EXISTS grants (
-                profile TEXT NOT NULL,
-                server_id TEXT NOT NULL,
-                grant BLOB NOT NULL,
-                PRIMARY KEY (profile, server_id)
-            );
             CREATE TABLE IF NOT EXISTS profile_keys (
                 profile TEXT PRIMARY KEY,
                 keys BLOB NOT NULL
@@ -82,6 +75,7 @@ impl Db {
                 server TEXT PRIMARY KEY,
                 secrets BLOB NOT NULL
             );
+            DROP TABLE IF EXISTS grants;
             PRAGMA user_version = {SCHEMA_VERSION};"
         ))?;
         let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| anyhow!("bad data key"))?;
@@ -213,7 +207,6 @@ impl Db {
     pub fn remove_profile(&self, profile: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM records WHERE profile = ?1", params![profile])?;
-        conn.execute("DELETE FROM grants WHERE profile = ?1", params![profile])?;
         conn.execute(
             "DELETE FROM profile_keys WHERE profile = ?1",
             params![profile],
@@ -247,45 +240,6 @@ impl Db {
             )?)),
             None => Ok(None),
         }
-    }
-
-    pub fn put_grant(&self, profile: &str, grant: &OAuthGrant) -> Result<()> {
-        let sealed = self.seal(
-            &aad(&[profile, "grants", &grant.server_id]),
-            &serde_json::to_vec(grant)?,
-        )?;
-        self.conn.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO grants (profile, server_id, grant) VALUES (?1, ?2, ?3)",
-            params![profile, grant.server_id, sealed],
-        )?;
-        Ok(())
-    }
-
-    pub fn grant(&self, profile: &str, server_id: &str) -> Result<Option<OAuthGrant>> {
-        let sealed: Option<Vec<u8>> = self
-            .conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT grant FROM grants WHERE profile = ?1 AND server_id = ?2",
-                params![profile, server_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match sealed {
-            Some(sealed) => Ok(Some(serde_json::from_slice(
-                &self.unseal(&aad(&[profile, "grants", server_id]), &sealed)?,
-            )?)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn drop_grant(&self, profile: &str, server_id: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM grants WHERE profile = ?1 AND server_id = ?2",
-            params![profile, server_id],
-        )?;
-        Ok(())
     }
 
     //secret config of a hosted mcp server

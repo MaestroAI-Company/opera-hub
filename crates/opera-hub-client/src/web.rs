@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{Forwarded, HubClient, HubError, McpGrant, PairedHub, SyncRecord};
+use crate::{Forwarded, HubClient, HubError, PairedHub, SyncRecord};
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
@@ -240,29 +240,6 @@ impl WebHubClient {
     pub fn watch(&self, hub: JsValue, since: f64) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
         Ok(promise(async move { inner.watch(hub, since as u64).await }))
-    }
-
-    #[wasm_bindgen(js_name = putGrant)]
-    pub fn put_grant(&self, hub: JsValue, grant: JsValue) -> Result<Promise, JsValue> {
-        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        let grant = from_js::<McpGrant>(grant)?;
-        Ok(promise(async move { inner.put_grant(hub, grant).await }))
-    }
-
-    #[wasm_bindgen(js_name = accessToken)]
-    pub fn access_token(&self, hub: JsValue, server_id: String) -> Result<Promise, JsValue> {
-        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        Ok(promise(
-            async move { inner.access_token(hub, server_id).await },
-        ))
-    }
-
-    #[wasm_bindgen(js_name = dropGrant)]
-    pub fn drop_grant(&self, hub: JsValue, server_id: String) -> Result<Promise, JsValue> {
-        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
-        Ok(promise(
-            async move { inner.drop_grant(hub, server_id).await },
-        ))
     }
 
     pub fn providers(&self, hub: JsValue) -> Result<Promise, JsValue> {

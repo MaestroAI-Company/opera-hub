@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use opera_hub_proto::{
     DeviceInfo, KIND_DESKTOP, KIND_PHONE, KIND_WEB, PairRejection, ProfileInfo, ProfileRole,
-    SCOPE_ADMIN, SCOPE_PROVIDERS, SCOPE_SECRETS, SCOPE_SYNC,
+    SCOPE_ADMIN, SCOPE_MCP, SCOPE_PROVIDERS, SCOPE_SECRETS, SCOPE_SYNC,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,15 @@ pub type Device = DeviceInfo;
 //phones and desktops get every scope
 pub fn default_scopes(kind: &str) -> Vec<String> {
     match kind {
-        KIND_PHONE | KIND_DESKTOP => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS, SCOPE_ADMIN]
-            .map(String::from)
-            .to_vec(),
+        KIND_PHONE | KIND_DESKTOP => [
+            SCOPE_SYNC,
+            SCOPE_SECRETS,
+            SCOPE_PROVIDERS,
+            SCOPE_MCP,
+            SCOPE_ADMIN,
+        ]
+        .map(String::from)
+        .to_vec(),
         //a browser tab never manages the hub
         KIND_WEB => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS]
             .map(String::from)
@@ -167,6 +173,8 @@ impl Store {
             return Ok(false);
         };
         device.profile = Some(profile.to_string());
+        //devices paired before a scope existed get it
+        device.scopes = default_scopes(&device.kind);
         write_json(&self.dir.join(DEVICES_FILE), &devices)?;
         Ok(true)
     }

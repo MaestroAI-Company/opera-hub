@@ -115,7 +115,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let llama = Llama::new(data_dir, http.clone());
     //models already on disk start serving
     llama.refresh();
-    let mcp = Mcp::new(data_dir, http.clone(), db.clone());
+    let mcp = Mcp::new(data_dir, http.clone(), db.clone(), store.clone());
     mcp.start_installed();
     let name: Arc<str> = config.hub_name().into();
     let links = Arc::new(Links::default());
@@ -150,6 +150,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                 Admin {
                     store: store.clone(),
                     db: db.clone(),
+                    mcp: mcp.clone(),
                     data_dir: data_dir.to_path_buf(),
                     settings: settings.clone(),
                     http: http.clone(),
@@ -188,17 +189,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
             SYNC_ALPN,
             OverIroh::new(DataSync { db: db.clone() }, &store),
         )
-        .accept(
-            SECRETS_ALPN,
-            OverIroh::new(
-                Secrets {
-                    db,
-                    http: http.clone(),
-                    refreshing: Default::default(),
-                },
-                &store,
-            ),
-        )
+        .accept(SECRETS_ALPN, OverIroh::new(Secrets { db }, &store))
         .accept(
             PROVIDERS_ALPN,
             OverIroh::new(

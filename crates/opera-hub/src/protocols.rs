@@ -251,6 +251,7 @@ impl Session {
 pub struct Admin {
     pub store: Arc<Store>,
     pub db: Arc<Db>,
+    pub mcp: Arc<crate::mcp::Mcp>,
     pub data_dir: std::path::PathBuf,
     pub settings: Arc<crate::settings::Settings>,
     pub http: reqwest::Client,
@@ -325,7 +326,7 @@ impl Protocol for Admin {
                         devices: self.store.devices()?,
                     }
                 }
-                AdminRequest::RemoveProfile { id } => match self.remove_profile(&id) {
+                AdminRequest::RemoveProfile { id } => match self.remove_profile(&id).await {
                     Ok(profiles) => {
                         info!(
                             "{} removed profile {}",
@@ -361,7 +362,7 @@ impl Protocol for Admin {
 }
 
 impl Admin {
-    fn remove_profile(&self, id: &str) -> Result<Vec<ProfileInfo>> {
+    async fn remove_profile(&self, id: &str) -> Result<Vec<ProfileInfo>> {
         let profiles = self.store.profiles()?;
         let left: Vec<_> = profiles.iter().filter(|p| p.id != id).cloned().collect();
         if left.len() == profiles.len() {
@@ -369,6 +370,7 @@ impl Admin {
         }
         ensure_admin(&left)?;
         //data first so nothing stays orphaned
+        self.mcp.remove_owned(id).await;
         self.db.remove_profile(id)?;
         self.store.remove_profile(id)?;
         self.store.profiles()

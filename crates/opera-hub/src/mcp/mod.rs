@@ -30,6 +30,7 @@ use runtime::{Runtimes, scrubbed_env};
 use sandbox::Policy;
 
 use crate::db::Db;
+use crate::store::Store;
 
 //providers ids of hosted servers
 pub const PROVIDER_PREFIX: &str = "mcp-";
@@ -51,6 +52,9 @@ pub struct Spec {
     #[serde(default)]
     pub values: BTreeMap<String, String>,
     pub enabled: bool,
+    //the profile that installed it, none for admins
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +93,10 @@ impl Server {
     fn title(&self) -> String {
         self.spec.lock().unwrap().listing.title.clone()
     }
+
+    fn owner(&self) -> Option<String> {
+        self.spec.lock().unwrap().owner.clone()
+    }
 }
 
 pub struct Mcp {
@@ -96,6 +104,7 @@ pub struct Mcp {
     data_dir: PathBuf,
     http: reqwest::Client,
     db: Arc<Db>,
+    store: Arc<Store>,
     runtimes: Arc<Runtimes>,
     servers: Mutex<HashMap<String, Arc<Server>>>,
     updates: Mutex<Option<JoinHandle<()>>>,
@@ -115,13 +124,19 @@ impl Drop for Mcp {
 }
 
 impl Mcp {
-    pub fn new(data_dir: &Path, http: reqwest::Client, db: Arc<Db>) -> Arc<Self> {
+    pub fn new(
+        data_dir: &Path,
+        http: reqwest::Client,
+        db: Arc<Db>,
+        store: Arc<Store>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             dir: data_dir.join("mcp"),
             data_dir: data_dir.to_path_buf(),
             runtimes: Arc::new(Runtimes::new(data_dir, http.clone())),
             http,
             db,
+            store,
             servers: Mutex::new(HashMap::new()),
             updates: Mutex::new(None),
             usage: Default::default(),
@@ -137,6 +152,13 @@ impl Mcp {
                     continue;
                 }
                 match read_spec(&entry.path()) {
+                    //its profile was removed while the hub was off
+                    Ok(spec) if spec.owner.as_ref().is_some_and(|o| !self.profile_exists(o)) => {
+                        warn!("mcp server {id} removed with its profile");
+                        sandbox::forget(&container_name(&entry.path()));
+                        let _ = self.db.drop_mcp_secrets(&id);
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
                     Ok(spec) => self.add(id, spec),
                     Err(e) => warn!("mcp server {id} skipped: {e:#}"),
                 }
@@ -185,17 +207,20 @@ impl Mcp {
     //answers at once, the install runs behind
     pub fn install(
         self: &Arc<Self>,
+        owner: &str,
         listing: McpListing,
         values: BTreeMap<String, String>,
     ) -> Result<String> {
         install::check_source(&listing.source)?;
-        let (plain, secrets) = self.split(&listing, values)?;
+        let owner = Some(owner.to_string());
+        let (plain, secrets) = self.split(&listing, values, owner.as_deref())?;
         let id = new_id()?;
         self.db.put_mcp_secrets(&id, &secrets)?;
         let spec = Spec {
             listing,
             values: plain,
             enabled: true,
+            owner,
         };
         let server = self.insert(id.clone(), spec, State::Installing);
         self.behind(server);
@@ -221,11 +246,12 @@ impl Mcp {
         //a bundle may declare other fields than the device saw
         let mut values = spec.values.clone();
         values.extend(self.db.mcp_secrets(&server.id)?);
-        let (plain, secrets) = self.split(&listing, values)?;
+        let (plain, secrets) = self.split(&listing, values, spec.owner.as_deref())?;
         let spec = Spec {
             listing,
             values: plain,
             enabled: spec.enabled,
+            owner: spec.owner,
         };
         write_spec(&server.dir, &spec)?;
         self.db.put_mcp_secrets(&server.id, &secrets)?;
@@ -244,14 +270,14 @@ impl Mcp {
         Ok(())
     }
 
-    pub fn configure(&self, id: &str, values: BTreeMap<String, String>) -> Result<()> {
-        let server = self.ready(id)?;
+    pub fn configure(&self, owner: &str, id: &str, values: BTreeMap<String, String>) -> Result<()> {
+        let server = self.ready(owner, id)?;
         let mut spec = server.spec.lock().unwrap().clone();
         let mut secrets = self.db.mcp_secrets(id)?;
         let mut merged: BTreeMap<String, String> = spec.values.clone();
         merged.extend(secrets.clone());
         merged.extend(values);
-        let (plain, kept) = self.split(&spec.listing, merged)?;
+        let (plain, kept) = self.split(&spec.listing, merged, spec.owner.as_deref())?;
         spec.values = plain;
         secrets = kept;
         write_spec(&server.dir, &spec)?;
@@ -264,8 +290,8 @@ impl Mcp {
         Ok(())
     }
 
-    pub fn enable(&self, id: &str, on: bool) -> Result<()> {
-        let server = self.ready(id)?;
+    pub fn enable(&self, owner: &str, id: &str, on: bool) -> Result<()> {
+        let server = self.ready(owner, id)?;
         let mut spec = server.spec.lock().unwrap().clone();
         spec.enabled = on;
         write_spec(&server.dir, &spec)?;
@@ -278,8 +304,8 @@ impl Mcp {
         Ok(())
     }
 
-    pub fn restart(&self, id: &str) -> Result<()> {
-        let server = self.ready(id)?;
+    pub fn restart(&self, owner: &str, id: &str) -> Result<()> {
+        let server = self.ready(owner, id)?;
         ensure!(
             server.spec.lock().unwrap().enabled,
             "this server is turned off"
@@ -289,8 +315,8 @@ impl Mcp {
     }
 
     //same values, newer package, behind
-    pub async fn update(self: &Arc<Self>, id: &str) -> Result<()> {
-        let server = self.ready(id)?;
+    pub async fn update(self: &Arc<Self>, owner: &str, id: &str) -> Result<()> {
+        let server = self.ready(owner, id)?;
         let listing = server.spec.lock().unwrap().listing.clone();
         let registry = listing
             .registry
@@ -307,7 +333,8 @@ impl Mcp {
         Ok(())
     }
 
-    pub async fn remove(&self, id: &str) -> Result<()> {
+    pub async fn remove(&self, owner: &str, id: &str) -> Result<()> {
+        self.owned(owner, id)?;
         let server = self
             .servers
             .lock()
@@ -328,8 +355,44 @@ impl Mcp {
             .with_context(|| format!("cannot delete {}", server.dir.display()))
     }
 
-    pub fn status(&self) -> Result<Vec<McpServer>> {
-        let servers: Vec<Arc<Server>> = self.servers.lock().unwrap().values().cloned().collect();
+    //a removed profile takes its servers along
+    pub async fn remove_owned(&self, profile: &str) {
+        let ids: Vec<String> = self
+            .servers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| s.owner().as_deref() == Some(profile))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            if let Err(e) = self.remove(profile, &id).await {
+                warn!("mcp server {id} not removed: {e:#}");
+            }
+        }
+    }
+
+    pub fn is_admin(&self, profile: &str) -> bool {
+        self.store
+            .profile(profile)
+            .ok()
+            .flatten()
+            .is_some_and(|p| p.role == opera_hub_proto::ProfileRole::Admin)
+    }
+
+    fn profile_exists(&self, profile: &str) -> bool {
+        self.store.profile(profile).ok().flatten().is_some()
+    }
+
+    pub fn status(&self, owner: &str) -> Result<Vec<McpServer>> {
+        let servers: Vec<Arc<Server>> = self
+            .servers
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| self.may_use(owner, s))
+            .cloned()
+            .collect();
         let pids: Vec<Option<u32>> = servers.iter().map(|s| *s.pid.lock().unwrap()).collect();
         let roots: Vec<u32> = pids.iter().flatten().copied().collect();
         let mut loads = self.usage.measure(&roots).into_iter();
@@ -366,9 +429,9 @@ impl Mcp {
         Ok(list)
     }
 
-    pub fn logs(&self, id: &str) -> Result<Vec<String>> {
+    pub fn logs(&self, owner: &str, id: &str) -> Result<Vec<String>> {
         Ok(self
-            .server(id)?
+            .owned(owner, id)?
             .tail
             .lock()
             .unwrap()
@@ -377,11 +440,16 @@ impl Mcp {
             .collect())
     }
 
-    //subfolders of the user's home, never hub data
-    pub fn folders(&self, path: Option<&str>) -> Result<(String, Option<String>, Vec<String>)> {
-        let home = home_dir()?;
+    //admins browse their home, members their own folder
+    pub fn folders(
+        &self,
+        owner: &str,
+        path: Option<&str>,
+    ) -> Result<(String, Option<String>, Vec<String>)> {
+        let owner = Some(owner);
+        let home = self.folder_root(owner)?;
         let path = match path {
-            Some(path) => self.check_folder(Path::new(path))?,
+            Some(path) => self.check_folder(Path::new(path), owner)?,
             None => home.clone(),
         };
         let mut folders: Vec<String> = std::fs::read_dir(&path)?
@@ -389,7 +457,7 @@ impl Mcp {
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| !name.starts_with('.'))
-            .filter(|name| self.check_folder(&path.join(name)).is_ok())
+            .filter(|name| self.check_folder(&path.join(name), owner).is_ok())
             .collect();
         folders.sort_by_key(|f| f.to_lowercase());
         let parent = (path != home)
@@ -419,12 +487,12 @@ impl Mcp {
         Ok(())
     }
 
-    //running servers devices can call
-    pub fn providers(&self) -> Vec<ProviderInfo> {
+    //running servers of this profile
+    pub fn providers(&self, owner: &str) -> Vec<ProviderInfo> {
         let servers = self.servers.lock().unwrap();
         let mut list: Vec<ProviderInfo> = servers
             .values()
-            .filter(|s| *s.state.lock().unwrap() == State::Running)
+            .filter(|s| self.may_use(owner, s) && *s.state.lock().unwrap() == State::Running)
             .map(|s| ProviderInfo {
                 id: format!("{PROVIDER_PREFIX}{}", s.id),
                 name: s.title(),
@@ -438,6 +506,7 @@ impl Mcp {
     //plain json answers, no session or stream
     pub async fn forward<R, W>(
         &self,
+        owner: &str,
         id: &str,
         head: &ForwardHead,
         reader: R,
@@ -455,11 +524,10 @@ impl Mcp {
         } else {
             let mut raw = Vec::new();
             reader.take(MAX_BODY_BYTES).read_to_end(&mut raw).await?;
+            //another profile's server looks absent
             let bridge = self
-                .servers
-                .lock()
-                .unwrap()
-                .get(id)
+                .owned(owner, id)
+                .ok()
                 .and_then(|s| s.bridge.lock().unwrap().clone());
             match (serde_json::from_slice::<Value>(&raw), bridge) {
                 (Err(_), _) => reply(400, Some(rpc_error(Value::Null, -32700, "invalid json"))),
@@ -499,6 +567,20 @@ impl Mcp {
             .ok_or_else(|| anyhow!("no mcp server {id}"))
     }
 
+    //servers from before profiles belong to admins
+    fn may_use(&self, profile: &str, server: &Server) -> bool {
+        match server.owner() {
+            Some(owner) => owner == profile,
+            None => self.is_admin(profile),
+        }
+    }
+
+    fn owned(&self, profile: &str, id: &str) -> Result<Arc<Server>> {
+        let server = self.server(id)?;
+        ensure!(self.may_use(profile, &server), "no mcp server {id}");
+        Ok(server)
+    }
+
     fn add(&self, id: String, spec: Spec) {
         let enabled = spec.enabled;
         let server = self.insert(id, spec, State::Stopped);
@@ -525,8 +607,8 @@ impl Mcp {
     }
 
     //a server busy installing waits
-    fn ready(&self, id: &str) -> Result<Arc<Server>> {
-        let server = self.server(id)?;
+    fn ready(&self, owner: &str, id: &str) -> Result<Arc<Server>> {
+        let server = self.owned(owner, id)?;
         ensure!(
             *server.state.lock().unwrap() != State::Installing,
             "this server is still installing"
@@ -549,6 +631,7 @@ impl Mcp {
         &self,
         listing: &McpListing,
         values: BTreeMap<String, String>,
+        owner: Option<&str>,
     ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
         let mut plain = BTreeMap::new();
         let mut secrets = BTreeMap::new();
@@ -562,7 +645,7 @@ impl Mcp {
                 continue;
             }
             if matches!(field.kind.as_str(), "folder" | "file") {
-                self.check_folder(Path::new(&value))?;
+                self.check_folder(Path::new(&value), owner)?;
             }
             if field.secret {
                 secrets.insert(key, value);
@@ -584,10 +667,30 @@ impl Mcp {
         Ok((plain, secrets))
     }
 
-    fn check_folder(&self, path: &Path) -> Result<PathBuf> {
+    //members never reach the host disk
+    fn folder_root(&self, owner: Option<&str>) -> Result<PathBuf> {
+        match owner {
+            Some(owner) if !self.is_admin(owner) => {
+                let root = self.data_dir.join("profiles").join(owner).join("files");
+                std::fs::create_dir_all(&root)?;
+                Ok(root)
+            }
+            _ => home_dir(),
+        }
+    }
+
+    fn check_folder(&self, path: &Path, owner: Option<&str>) -> Result<PathBuf> {
         let real = path
             .canonicalize()
             .with_context(|| format!("{} does not exist", path.display()))?;
+        if let Some(owner) = owner.filter(|o| !self.is_admin(o)) {
+            let root = self.folder_root(Some(owner))?.canonicalize()?;
+            ensure!(
+                real.starts_with(&root),
+                "only your own folder can be shared"
+            );
+            return Ok(path.to_path_buf());
+        }
         let home = home_dir()?.canonicalize()?;
         ensure!(
             real.starts_with(&home),
@@ -800,7 +903,11 @@ mod tests {
         let data = std::env::temp_dir().join(format!("opera-hub-mcp-split-{}", new_id().unwrap()));
         std::fs::create_dir_all(&data).unwrap();
         let db = Arc::new(Db::open_with_key(&data.join("hub.db"), &[7u8; 32]).unwrap());
-        let mcp = Mcp::new(&data, crate::secrets::http_client().unwrap(), db);
+        let store = Arc::new(Store::new(&data));
+        let owner = store.create_profile("owner").unwrap();
+        let member = store.create_profile("member").unwrap();
+        let mcp = Mcp::new(&data, crate::secrets::http_client().unwrap(), db, store);
+        let admin = Some(owner.id.as_str());
         let listing = listing(vec![
             field("token", "text", true, true),
             field("mode", "text", false, false),
@@ -814,23 +921,35 @@ mod tests {
         };
 
         assert!(
-            mcp.split(&listing, values(&[("mode", "x")])).is_err(),
+            mcp.split(&listing, values(&[("mode", "x")]), admin)
+                .is_err(),
             "required"
         );
         assert!(
-            mcp.split(&listing, values(&[("token", "t"), ("other", "x")]))
+            mcp.split(&listing, values(&[("token", "t"), ("other", "x")]), admin)
                 .is_err(),
             "unknown"
         );
         let outside = data.join("data-folder");
         std::fs::create_dir_all(&outside).unwrap();
         let hub_data = values(&[("token", "t"), ("folder", &outside.to_string_lossy())]);
-        assert!(mcp.split(&listing, hub_data).is_err(), "hub data");
+        assert!(mcp.split(&listing, hub_data, admin).is_err(), "hub data");
         let (plain, secrets) = mcp
-            .split(&listing, values(&[("token", "t"), ("mode", "m")]))
+            .split(&listing, values(&[("token", "t"), ("mode", "m")]), admin)
             .unwrap();
         assert_eq!(plain, values(&[("mode", "m")]));
         assert_eq!(secrets, values(&[("token", "t")]));
+
+        //a member only shares its own folder
+        let (root, _, _) = mcp.folders(&member.id, None).unwrap();
+        let member = Some(member.id.as_str());
+        let mine = Path::new(&root).join("notes");
+        std::fs::create_dir_all(&mine).unwrap();
+        let own = values(&[("token", "t"), ("folder", &mine.to_string_lossy())]);
+        assert!(mcp.split(&listing, own, member).is_ok());
+        let home = home_dir().unwrap();
+        let host = values(&[("token", "t"), ("folder", &home.to_string_lossy())]);
+        assert!(mcp.split(&listing, host, member).is_err(), "host disk");
         let _ = std::fs::remove_dir_all(&data);
     }
 }

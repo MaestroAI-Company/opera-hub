@@ -132,6 +132,27 @@ fn test_key(profile: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(&profile.as_bytes()[..32])
 }
 
+//the http status of a call through the proxy
+async fn status_line(proxy: &ProxyInfo, provider: &str) -> String {
+    let body = r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
+    let mut socket = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+    let request = format!(
+        "POST /{}/{provider}/ HTTP/1.1
+host: localhost
+content-type: application/json
+content-length: {}
+connection: close
+
+{body}",
+        proxy.token,
+        body.len()
+    );
+    socket.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).await.unwrap();
+    response.lines().next().unwrap_or_default().to_string()
+}
+
 //one json-rpc call through the device proxy
 async fn rpc(proxy: &ProxyInfo, provider: &str, message: Value) -> Value {
     let body = message.to_string();
@@ -352,6 +373,51 @@ async fn hub_runs_mcp_servers() {
     assert_eq!(from_browser, "hub says browser");
     assert!(everything_echo.contains("hello"), "{everything_echo}");
     assert!(now.contains("Europe/Paris"), "{now}");
+
+    //another profile never reaches these servers
+    let flatmate = new_client();
+    let link = opera_hub::hub::pairing_link(&data_dir).unwrap().to_string();
+    let flatmate_hub = flatmate
+        .pair(link, "flatmate".into(), "phone".into(), None)
+        .await
+        .unwrap();
+    let store = opera_hub::store::Store::new(&data_dir);
+    let other = store.create_profile("flatmate").unwrap();
+    assert!(store.bind_device(&flatmate.device_id(), &other.id).unwrap());
+    flatmate
+        .set_profile(other.id.clone(), test_key(&other.id))
+        .unwrap();
+    let theirs = flatmate.mcp_status(flatmate_hub.clone()).await.unwrap();
+    assert!(theirs.servers.is_empty());
+    let listed = flatmate.providers(flatmate_hub.clone()).await.unwrap();
+    assert!(listed.iter().all(|p| p.kind != "mcp"), "{listed:?}");
+    assert!(
+        flatmate
+            .mcp_remove(flatmate_hub.clone(), echo_id.clone())
+            .await
+            .is_err()
+    );
+    let flatmate_proxy = flatmate
+        .clone()
+        .start_proxy(flatmate_hub.clone())
+        .await
+        .unwrap();
+    assert!(status_line(&flatmate_proxy, &echo).await.contains("503"));
+    //a member only shares its own folder
+    let folders = flatmate
+        .mcp_folders(flatmate_hub.clone(), None)
+        .await
+        .unwrap();
+    assert!(folders.path.contains(&other.id), "{folders:?}");
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap();
+    assert!(
+        flatmate
+            .mcp_folders(flatmate_hub.clone(), Some(home))
+            .await
+            .is_err()
+    );
 
     //a new secret restarts the server
     phone

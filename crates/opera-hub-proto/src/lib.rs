@@ -57,6 +57,8 @@ pub const SCOPE_SYNC: &str = "sync";
 pub const SCOPE_SECRETS: &str = "secrets";
 pub const SCOPE_PROVIDERS: &str = "providers";
 pub const SCOPE_ADMIN: &str = "admin";
+//own mcp servers, phones and desktops only
+pub const SCOPE_MCP: &str = "mcp";
 
 pub const KIND_PHONE: &str = "phone";
 pub const KIND_DESKTOP: &str = "desktop";
@@ -332,24 +334,6 @@ pub struct Record {
     pub payload: Option<String>,
 }
 
-//refresh token stays on the hub
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OAuthGrant {
-    pub server_id: String,
-    pub token_endpoint: String,
-    pub client_id: String,
-    pub refresh_token: String,
-    pub access_token: Option<String>,
-    //unix millis
-    pub expires_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccessToken {
-    pub access_token: String,
-    pub expires_at: u64,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SecretsRequest {
@@ -360,15 +344,6 @@ pub enum SecretsRequest {
     Pull {
         collection: String,
         since: u64,
-    },
-    PutGrant {
-        grant: OAuthGrant,
-    },
-    AccessToken {
-        server_id: String,
-    },
-    DropGrant {
-        server_id: String,
     },
 }
 
@@ -381,12 +356,6 @@ pub enum SecretsResponse {
         cursor: u64,
         more: bool,
     },
-    GrantSaved,
-    //none means signing in again
-    AccessToken {
-        token: Option<AccessToken>,
-    },
-    GrantDropped,
     Error {
         message: String,
     },

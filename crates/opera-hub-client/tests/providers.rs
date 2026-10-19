@@ -1,7 +1,6 @@
 //needs network for address lookup
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -11,7 +10,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use opera_hub::providers::Target;
-use opera_hub_client::{HubClient, HubError, McpGrant, PairedHub, SyncRecord};
+use opera_hub_client::{HubClient, HubError, PairedHub, SyncRecord};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -27,45 +26,26 @@ fn new_client() -> Arc<HubClient> {
     HubClient::new(key.to_vec()).unwrap()
 }
 
-//fake ollama and oauth token endpoint
-async fn fake_server(refreshes: Arc<AtomicUsize>) -> String {
+//fake ollama
+async fn fake_server() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
         loop {
             let (socket, _) = listener.accept().await.unwrap();
-            let refreshes = refreshes.clone();
             tokio::spawn(async move {
-                let service = service_fn(move |req: Request<Incoming>| {
-                    let refreshes = refreshes.clone();
-                    async move {
-                        let path = req.uri().path().to_string();
-                        let body = req.into_body().collect().await.unwrap().to_bytes();
-                        let body = String::from_utf8_lossy(&body).to_string();
-                        let (status, reply) = match path.as_str() {
-                            "/api/tags" => (200, r#"{"models":[]}"#.to_string()),
-                            "/api/chat" => (200, format!("echo:{body}")),
-                            "/token" => {
-                                let done = refreshes.load(Ordering::SeqCst);
-                                //only the latest refresh token works
-                                if body.contains(&format!("refresh_token=rt-{done}")) {
-                                    let next = refreshes.fetch_add(1, Ordering::SeqCst) + 1;
-                                    (
-                                        200,
-                                        format!(
-                                            r#"{{"access_token":"at-{next}","expires_in":3600,"refresh_token":"rt-{next}"}}"#
-                                        ),
-                                    )
-                                } else {
-                                    (400, r#"{"error":"invalid_grant"}"#.to_string())
-                                }
-                            }
-                            _ => (404, String::new()),
-                        };
-                        let mut response = Response::new(Full::new(Bytes::from(reply)));
-                        *response.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
-                        Ok::<_, Infallible>(response)
-                    }
+                let service = service_fn(move |req: Request<Incoming>| async move {
+                    let path = req.uri().path().to_string();
+                    let body = req.into_body().collect().await.unwrap().to_bytes();
+                    let body = String::from_utf8_lossy(&body).to_string();
+                    let (status, reply) = match path.as_str() {
+                        "/api/tags" => (200, r#"{"models":[]}"#.to_string()),
+                        "/api/chat" => (200, format!("echo:{body}")),
+                        _ => (404, String::new()),
+                    };
+                    let mut response = Response::new(Full::new(Bytes::from(reply)));
+                    *response.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
+                    Ok::<_, Infallible>(response)
                 });
                 let _ = http1::Builder::new()
                     .serve_connection(TokioIo::new(socket), service)
@@ -138,9 +118,8 @@ fn record(id: &str, updated_at: u64, payload: &str) -> SyncRecord {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn providers_secrets_and_oauth() {
-    let refreshes = Arc::new(AtomicUsize::new(0));
-    let fake = fake_server(refreshes.clone()).await;
+async fn providers_and_secrets() {
+    let fake = fake_server().await;
     let data_dir = std::env::temp_dir().join(format!("opera-hub-e2e-{}", random_hex::<8>()));
     let targets = vec![Target {
         id: "fake".into(),
@@ -211,40 +190,6 @@ async fn providers_secrets_and_oauth() {
     assert_eq!(page.records[0].payload.as_deref(), Some("new"));
     let unknown = phone.pull(hub_ref.clone(), "nope".into(), 0).await;
     assert!(matches!(unknown, Err(HubError::Internal(_))), "{unknown:?}");
-
-    //one refresh for concurrent devices
-    let grant = McpGrant {
-        server_id: "mcp".into(),
-        token_endpoint: format!("{fake}/token"),
-        client_id: "client".into(),
-        refresh_token: "rt-0".into(),
-        access_token: None,
-        expires_at: 0,
-    };
-    phone
-        .put_grant(hub_ref.clone(), grant.clone())
-        .await
-        .unwrap();
-    let (a, b) = tokio::join!(
-        phone.access_token(hub_ref.clone(), "mcp".into()),
-        laptop.access_token(hub_ref.clone(), "mcp".into())
-    );
-    assert_eq!(a.unwrap().unwrap().access_token, "at-1");
-    assert_eq!(b.unwrap().unwrap().access_token, "at-1");
-    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-
-    //refused refresh asks for sign in
-    let revoked = McpGrant {
-        server_id: "revoked".into(),
-        refresh_token: "bad".into(),
-        ..grant
-    };
-    phone.put_grant(hub_ref.clone(), revoked).await.unwrap();
-    let token = phone
-        .access_token(hub_ref.clone(), "revoked".into())
-        .await
-        .unwrap();
-    assert!(token.is_none());
 
     stop_tx.send(()).unwrap();
     hub.await.unwrap().unwrap();

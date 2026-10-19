@@ -70,7 +70,7 @@ impl std::fmt::Debug for Providers {
 impl Protocol for Providers {
     const ACCESS: Access = Access::Scope(SCOPE_PROVIDERS);
 
-    async fn serve<R, W>(&self, _peer: Peer, mut reader: R, mut writer: W) -> Result<()>
+    async fn serve<R, W>(&self, peer: Peer, mut reader: R, mut writer: W) -> Result<()>
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
@@ -80,11 +80,11 @@ impl Protocol for Providers {
         };
         match request {
             ProvidersRequest::List => {
-                let providers = self.detect().await;
+                let providers = self.detect(peer.profile()?).await;
                 write_frame(&mut writer, &ProvidersResponse::Providers { providers }).await
             }
             ProvidersRequest::Forward { head } => {
-                if let Err(e) = self.forward(head, reader, &mut writer).await {
+                if let Err(e) = self.forward(&peer, head, reader, &mut writer).await {
                     write_frame(
                         &mut writer,
                         &ProvidersResponse::Error {
@@ -100,9 +100,9 @@ impl Protocol for Providers {
 }
 
 impl Providers {
-    async fn detect(&self) -> Vec<ProviderInfo> {
-        //installed by an admin, shared on purpose
-        let mut found = self.mcp.providers();
+    async fn detect(&self, profile: &str) -> Vec<ProviderInfo> {
+        //each profile reaches its own servers
+        let mut found = self.mcp.providers(profile);
         if !self.settings.get().share_providers {
             return found;
         }
@@ -129,13 +129,22 @@ impl Providers {
         found
     }
 
-    async fn forward<R, W>(&self, head: ForwardHead, reader: R, writer: &mut W) -> Result<()>
+    async fn forward<R, W>(
+        &self,
+        peer: &Peer,
+        head: ForwardHead,
+        reader: R,
+        writer: &mut W,
+    ) -> Result<()>
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
     {
         if let Some(id) = head.provider.strip_prefix(crate::mcp::PROVIDER_PREFIX) {
-            return self.mcp.forward(id, &head, reader, writer).await;
+            return self
+                .mcp
+                .forward(peer.profile()?, id, &head, reader, writer)
+                .await;
         }
         if !self.settings.get().share_providers {
             bail!("this hub does not share its providers");

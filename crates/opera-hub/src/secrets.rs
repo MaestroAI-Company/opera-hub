@@ -1,22 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use opera_hub_proto::{
-    AccessToken, SCOPE_SECRETS, SECRET_COLLECTIONS, SecretsRequest, SecretsResponse, read_frame,
-    write_frame,
+    SCOPE_SECRETS, SECRET_COLLECTIONS, SecretsRequest, SecretsResponse, read_frame, write_frame,
 };
-use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::warn;
 
 use crate::db::Db;
 use crate::protocols::{Access, Peer, Protocol};
-use crate::store::unix_now;
 
 const PULL_LIMIT: usize = 200;
-//renew early before expiry
-const EXPIRY_MARGIN_MS: u64 = 60_000;
 
 pub fn http_client() -> Result<reqwest::Client> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -33,13 +27,10 @@ pub fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-//provider configs and the oauth token broker
+//provider configs, sealed by each profile
 #[derive(Clone)]
 pub struct Secrets {
     pub db: Arc<Db>,
-    pub http: reqwest::Client,
-    //serialized so rotating tokens never fork
-    pub refreshing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -92,91 +83,13 @@ impl Secrets {
                     more,
                 }
             }
-            SecretsRequest::PutGrant { grant } => {
-                check_endpoint(&grant.token_endpoint)?;
-                self.db.put_grant(peer.profile()?, &grant)?;
-                SecretsResponse::GrantSaved
-            }
-            SecretsRequest::AccessToken { server_id } => SecretsResponse::AccessToken {
-                token: self.access_token(peer.profile()?, &server_id).await?,
-            },
-            SecretsRequest::DropGrant { server_id } => {
-                self.db.drop_grant(peer.profile()?, &server_id)?;
-                SecretsResponse::GrantDropped
-            }
         })
     }
-
-    async fn access_token(&self, profile: &str, server_id: &str) -> Result<Option<AccessToken>> {
-        let _guard = self.refreshing.lock().await;
-        let Some(mut grant) = self.db.grant(profile, server_id)? else {
-            return Ok(None);
-        };
-        if let Some(token) = &grant.access_token
-            && grant.expires_at > unix_now() * 1000 + EXPIRY_MARGIN_MS
-        {
-            return Ok(Some(AccessToken {
-                access_token: token.clone(),
-                expires_at: grant.expires_at,
-            }));
-        }
-
-        let response = self
-            .http
-            .post(&grant.token_endpoint)
-            .header("Accept", "application/json")
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", grant.refresh_token.as_str()),
-                ("client_id", grant.client_id.as_str()),
-            ])
-            .send()
-            .await?;
-        //refused refresh means signing in again
-        if response.status().is_client_error() {
-            warn!(
-                "refresh refused for mcp server {server_id}: {}",
-                response.status()
-            );
-            self.db.drop_grant(profile, server_id)?;
-            return Ok(None);
-        }
-        let response = response.error_for_status()?;
-        let doc: TokenResponse = serde_json::from_slice(&response.bytes().await?)?;
-
-        grant.expires_at = unix_now() * 1000 + doc.expires_in.unwrap_or(3600) * 1000;
-        grant.access_token = Some(doc.access_token.clone());
-        if let Some(refresh) = doc.refresh_token {
-            grant.refresh_token = refresh;
-        }
-        self.db.put_grant(profile, &grant)?;
-        Ok(Some(AccessToken {
-            access_token: doc.access_token,
-            expires_at: grant.expires_at,
-        }))
-    }
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    expires_in: Option<u64>,
-    refresh_token: Option<String>,
 }
 
 fn check_collection(collection: &str) -> Result<()> {
     if !SECRET_COLLECTIONS.contains(&collection) {
         bail!("unknown collection {collection}");
-    }
-    Ok(())
-}
-
-//https only except localhost
-fn check_endpoint(endpoint: &str) -> Result<()> {
-    let url = reqwest::Url::parse(endpoint)?;
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    if url.scheme() != "https" && !(url.scheme() == "http" && local) {
-        return Err(anyhow!("token endpoint must use https"));
     }
     Ok(())
 }
