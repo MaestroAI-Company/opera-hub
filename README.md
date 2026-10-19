@@ -3,6 +3,7 @@
 Opera Hub is a small self-hosted server that keeps your [Opera](https://github.com/MaestroAI-Company/opera) devices in sync. Install it on a computer you own, pair your phone, desktop and browser, and the hub handles the rest:
 
 - **Sync**: conversations, settings and AI providers move between your devices.
+- **Profiles**: one hub for a home or a flat share. Each person has a profile, sealed end to end: the hub stores it but cannot read it, its owner included.
 - **Shared AI**: Ollama, LM Studio and llama.cpp running on the hub's computer can be used from every paired device, even outside your home network.
 - **Local models**: the hub can download and run [llama.cpp](https://github.com/ggml-org/llama.cpp) models itself. It picks the GPU backend for you, and you manage it from the Opera app.
 
@@ -49,6 +50,18 @@ On the same network, Opera also finds the hub by itself and lists it under **Nea
 
 On Windows and macOS, the tray icon shows the same code.
 
+## Profiles
+
+A paired device then picks its profile:
+
+- **new person**: create a profile with a name and a password. The first profile of a hub manages it, the next ones are members;
+- **existing profile**: pick it and type its password, for example after reinstalling Opera;
+- **another device of yours**: on a device that already has the profile, choose **Add one of my devices**. It shows a code; type it on the new device and compare the six digits on both screens. The key goes from one device to the other, no password needed.
+
+The profile key is created on the device and never reaches the hub in clear. The hub keeps a copy locked by the password, and five wrong passwords lock the profile for a growing wait. A forgotten password with no device left loses the profile: nobody can reset it.
+
+Each profile has its own conversations, settings, API keys and hosted MCP servers. Members never see each other's data, and only admins manage the hub. Requests to the hub's models and MCP tools are processed in clear on the hub machine while they answer.
+
 ## Commands
 
 | Command | What it does |
@@ -57,6 +70,9 @@ On Windows and macOS, the tray icon shows the same code.
 | `opera-hub pair` | Show a one-time QR code and code to pair a device |
 | `opera-hub devices` | List paired devices |
 | `opera-hub devices remove <id>` | Unpair a device by id or id prefix |
+| `opera-hub profiles` | List profiles |
+| `opera-hub profiles remove <id>` | Remove a profile with its data, devices and MCP servers |
+| `opera-hub profiles promote <id>` | Let a profile manage the hub |
 | `opera-hub service install` | Start the hub with your session, now and at every login |
 | `opera-hub service start` / `stop` / `status` | Control the background service |
 | `opera-hub service uninstall` | Stop the hub and remove it from your session |
@@ -67,7 +83,7 @@ Every command takes `--data-dir <path>` to use another data directory, for examp
 
 ## Managing the hub from Opera
 
-Phones and desktops paired to the hub can manage it from **Settings → Opera Hub**:
+Admin profiles, on a phone or a desktop, manage the hub from Opera's hub page:
 
 - choose what each device syncs;
 - rename or remove paired devices. Devices not seen for 30 days are marked inactive, and reinstalling Opera on the same device replaces its old entry;
@@ -75,7 +91,7 @@ Phones and desktops paired to the hub can manage it from **Settings → Opera Hu
 - install hub updates. The hub checks GitHub every 6 hours and Opera offers the new version;
 - download, run and delete llama.cpp models.
 
-Browsers can sync but never manage the hub.
+Every member installs and runs its own MCP servers on the hub; a member's servers only reach its own folder on the hub, never the host's files. Browsers can sync but never manage the hub.
 
 ## Local models with llama.cpp
 
@@ -88,7 +104,8 @@ The model is served to all your devices as the **llama.cpp** provider of the hub
 - **Transport**: devices reach the hub through [iroh](https://github.com/n0-computer/iroh) QUIC connections, encrypted end to end and authenticated by key. They connect directly when they can and through a relay otherwise, so the hub works from anywhere without opening a port.
 - **Pairing**: the code is stretched with Argon2id into a temporary key that opens a one-time pairing endpoint. A wrong code closes it after 5 attempts.
 - **Access**: every request is denied by default. Each paired device has its own key and its own permissions, and access is checked again on every stream, so a removed device is cut off at once.
-- **Storage**: the hub keeps its data in an SQLite database, each row encrypted with XChaCha20-Poly1305. The key lives in the OS keychain, or in a key file when no keychain is available.
+- **End to end**: every synced record is sealed on the device with its profile key (XChaCha20-Poly1305), record ids included. The password is stretched with Argon2id (64 MiB) into a proof for the hub and a key that locks the profile key. Device links use X25519 with a commitment, so a relaying hub cannot pick keys that match the six digits.
+- **Storage**: the hub keeps its data in an SQLite database, each row encrypted again with XChaCha20-Poly1305. The key lives in the OS keychain, or in a key file when no keychain is available.
 
 The hub keeps its data here:
 
