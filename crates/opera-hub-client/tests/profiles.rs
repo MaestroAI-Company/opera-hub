@@ -77,6 +77,11 @@ async fn profiles_lock_and_link() {
         .await
         .unwrap();
     assert_eq!(owner.profile.role, "admin");
+    //a cloud backup reopens the key with the password alone
+    let lock = phone.locked_key(hub_ref.clone()).await.unwrap();
+    let reopened = opera_hub_client::open_locked_key(lock.clone(), "correct horse".into()).unwrap();
+    assert_eq!(reopened, owner.key);
+    assert!(opera_hub_client::open_locked_key(lock, "wrong".into()).is_err());
     phone
         .push(
             hub_ref.clone(),

@@ -257,6 +257,11 @@ pub fn link_digits(approver: &str, joiner: &str) -> String {
     format!("{number:06}")
 }
 
+//the cloud backup never reuses the record key
+pub fn backup_key(key: &Key) -> Key {
+    subkey(key, b"opera-cloud-backup-1")
+}
+
 fn subkey(key: &Key, info: &[u8]) -> Key {
     let mut out = [0u8; 32];
     Hkdf::<Sha256>::new(None, key)
@@ -338,6 +343,14 @@ mod tests {
         assert!(unlock(&wrong, &locked).is_err());
         //a hub cannot weaken the settings
         assert!(derive("correct horse", &locked.salt, 1024, 1).is_err());
+    }
+
+    #[test]
+    fn backup_key_is_its_own() {
+        let key = new_key().unwrap();
+        assert_eq!(backup_key(&key), backup_key(&key));
+        assert_ne!(backup_key(&key), key);
+        assert_ne!(backup_key(&key), subkey(&key, b"opera-records-1"));
     }
 
     #[test]

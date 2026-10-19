@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{Forwarded, HubClient, HubError, PairedHub, SyncRecord};
+use crate::{Forwarded, HubClient, HubError, PairedHub, ProfileLock, SyncRecord};
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
@@ -129,6 +129,12 @@ impl WebHubClient {
         Ok(promise(
             async move { inner.rename_profile(hub, name).await },
         ))
+    }
+
+    #[wasm_bindgen(js_name = lockedKey)]
+    pub fn locked_key(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.locked_key(hub).await }))
     }
 
     #[wasm_bindgen(js_name = linkStart)]
@@ -290,6 +296,16 @@ impl WebHubClient {
 #[wasm_bindgen(js_name = qrSvg)]
 pub fn qr_svg(text: String, dark: String, light: String) -> Result<String, JsValue> {
     crate::qr_svg(text, dark, light).map_err(hub_error)
+}
+
+#[wasm_bindgen(js_name = openLockedKey)]
+pub fn open_locked_key(lock: JsValue, password: String) -> Result<String, JsValue> {
+    crate::open_locked_key(from_js::<ProfileLock>(lock)?, password).map_err(hub_error)
+}
+
+#[wasm_bindgen(js_name = profileBackupKey)]
+pub fn profile_backup_key(key: String) -> Result<String, JsValue> {
+    crate::profile_backup_key(key).map_err(hub_error)
 }
 
 #[wasm_bindgen]

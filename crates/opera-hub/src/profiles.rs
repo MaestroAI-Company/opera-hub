@@ -122,6 +122,10 @@ impl Profiles {
                     .put_profile_key(profile, &ProfileKey { locked, auth_hash })?;
                 ProfileResponse::Done
             }
+            //already unlocked, so nothing new to brute force
+            ProfileRequest::LockedKey => ProfileResponse::LockedKey {
+                locked: self.key(peer.profile()?)?.locked,
+            },
             ProfileRequest::Rename { name } => {
                 let name =
                     clean_device_name(&name).ok_or_else(|| anyhow!("a profile needs a name"))?;

@@ -251,6 +251,8 @@ pub enum ProfileRequest {
     Rename {
         name: String,
     },
+    //for the cloud backup header
+    LockedKey,
     //a device of the profile shows a code
     LinkStart {
         commitment: String,
@@ -286,6 +288,9 @@ pub enum ProfileResponse {
     },
     Unlocked {
         profile: ProfileInfo,
+        locked: LockedKey,
+    },
+    LockedKey {
         locked: LockedKey,
     },
     Done,

@@ -306,6 +306,22 @@ pub struct HubProfile {
 pub struct UnlockedProfile {
     pub profile: HubProfile,
     pub key: String,
+    //none after a device link, the hub has it
+    pub lock: Option<ProfileLock>,
+}
+
+//what a cloud backup needs to reopen the key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileLock {
+    pub salt: String,
+    pub memory_kib: u32,
+    pub passes: u32,
+    pub wrapped: String,
 }
 
 //compare these digits before approving
@@ -440,11 +456,11 @@ impl HubClient {
                 .await?;
         let request = ProfileRequest::Create {
             name,
-            locked,
+            locked: locked.clone(),
             auth_hash: auth_hash(&auth_key),
         };
         match self.profile_request(&hub, request).await? {
-            ProfileResponse::Profile { profile } => self.unlocked_with(profile, key),
+            ProfileResponse::Profile { profile } => self.unlocked_with(profile, key, Some(locked)),
             other => Err(unexpected_profile(other)),
         }
     }
@@ -463,7 +479,7 @@ impl HubClient {
         match self.profile_request(&hub, request).await? {
             ProfileResponse::Unlocked { profile, locked } => {
                 let key = profile::unlock(&derived, &locked).map_err(internal)?;
-                self.unlocked_with(profile, key)
+                self.unlocked_with(profile, key, Some(locked))
             }
             other => Err(unexpected_profile(other)),
         }
@@ -502,6 +518,22 @@ impl HubClient {
             .await?
         {
             ProfileResponse::Profile { profile } => Ok(hub_profile(profile)),
+            other => Err(unexpected_profile(other)),
+        }
+    }
+
+    //the hub copy, for the cloud backup header
+    pub async fn locked_key(&self, hub: PairedHub) -> Result<ProfileLock, HubError> {
+        match self
+            .profile_request(&hub, ProfileRequest::LockedKey)
+            .await?
+        {
+            ProfileResponse::LockedKey { locked } => Ok(ProfileLock {
+                salt: locked.salt,
+                memory_kib: locked.memory_kib,
+                passes: locked.passes,
+                wrapped: locked.wrapped,
+            }),
             other => Err(unexpected_profile(other)),
         }
     }
@@ -625,7 +657,7 @@ impl HubClient {
             (Some(public), Some(sealed), Some(info)) => {
                 let key = session.keys.open_from(&public, &sealed).map_err(internal)?;
                 link.take();
-                Some(self.unlocked_with(info, key)?)
+                Some(self.unlocked_with(info, key, None)?)
             }
             _ => None,
         };
@@ -1111,6 +1143,7 @@ impl HubClient {
         &self,
         profile: ProfileInfo,
         key: profile::Key,
+        locked: Option<opera_hub_proto::LockedKey>,
     ) -> Result<UnlockedProfile, HubError> {
         *self.profile.lock().unwrap() = Some(Unlocked {
             id: profile.id.clone(),
@@ -1119,6 +1152,12 @@ impl HubClient {
         Ok(UnlockedProfile {
             profile: hub_profile(profile),
             key: profile::encode_key(&key),
+            lock: locked.map(|locked| ProfileLock {
+                salt: locked.salt,
+                memory_kib: locked.memory_kib,
+                passes: locked.passes,
+                wrapped: locked.wrapped,
+            }),
         })
     }
 
@@ -1529,6 +1568,34 @@ impl From<ProtoSettings> for HubSettings {
             share_providers: settings.share_providers,
         }
     }
+}
+
+//a cloud restore has no hub to ask
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    uniffi::export
+)]
+pub fn open_locked_key(lock: ProfileLock, password: String) -> Result<String, HubError> {
+    let derived =
+        profile::derive(&password, &lock.salt, lock.memory_kib, lock.passes).map_err(internal)?;
+    let locked = opera_hub_proto::LockedKey {
+        salt: lock.salt,
+        memory_kib: lock.memory_kib,
+        passes: lock.passes,
+        wrapped: lock.wrapped,
+    };
+    let key = profile::unlock(&derived, &locked).map_err(internal)?;
+    Ok(profile::encode_key(&key))
+}
+
+//seals the cloud backup of a profile
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    uniffi::export
+)]
+pub fn profile_backup_key(key: String) -> Result<String, HubError> {
+    let key = profile::decode_key(&key).map_err(internal)?;
+    Ok(profile::encode_key(&profile::backup_key(&key)))
 }
 
 //apps draw pairing links without a qr library
