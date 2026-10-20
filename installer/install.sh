@@ -56,8 +56,4 @@ fi
 "$DIR/opera-hub" service install
 
 echo "Opera Hub is installed in $DIR and starts with your session"
-echo "pair a device with: $DIR/opera-hub pair"
-case ":$PATH:" in
-  *":$DIR:"*) ;;
-  *) echo "add $DIR to your PATH to type opera-hub directly" ;;
-esac
+echo "pair a device with: opera-hub pair"

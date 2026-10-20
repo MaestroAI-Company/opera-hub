@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use iroh_tickets::endpoint::EndpointTicket;
+use opera_hub::cli_path;
 use opera_hub::db::Db;
 use opera_hub::service::{self, Launch, Status};
 use opera_hub::store::{self, Store};
@@ -142,6 +143,10 @@ fn main() -> Result<()> {
             ServiceAction::Install => {
                 service::install(&launch(&data_dir)?)?;
                 println!("installed, the hub starts with your session and runs now");
+                match cli_path::add_self() {
+                    Ok(()) => println!("open a new terminal to type opera-hub directly"),
+                    Err(e) => eprintln!("cannot add opera-hub to your PATH: {e:#}"),
+                }
                 if cfg!(target_os = "linux") {
                     println!(
                         "to start it at boot without a login session, run: loginctl enable-linger $USER"
@@ -151,6 +156,8 @@ fn main() -> Result<()> {
             }
             ServiceAction::Uninstall => {
                 service::uninstall()?;
+                //cleanup failure is not worth an error
+                let _ = cli_path::remove_self();
                 println!("uninstalled");
                 Ok(())
             }

@@ -1,3 +1,4 @@
+pub mod cli_path;
 pub mod config;
 pub mod db;
 pub mod hub;

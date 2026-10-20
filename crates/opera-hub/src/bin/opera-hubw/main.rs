@@ -7,6 +7,8 @@ mod tray;
 use std::path::PathBuf;
 
 use anyhow::Result;
+#[cfg(any(windows, target_os = "macos"))]
+use opera_hub::cli_path;
 use opera_hub::{config, hub};
 use tokio::sync::oneshot;
 
@@ -17,6 +19,12 @@ fn main() -> Result<()> {
         _ => config::default_data_dir()?,
     };
     hub::init_logging(&data_dir, true)?;
+
+    //installers only copy the binaries
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Err(e) = cli_path::add_self() {
+        tracing::warn!("cannot add opera-hub to the path: {e:#}");
+    }
 
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     //the tray opens pairing codes on it too

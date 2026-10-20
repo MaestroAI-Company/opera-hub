@@ -44,7 +44,7 @@ libc = "0.2"
 landlock = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 png = { version = "0.18", optional = true }
@@ -93,5 +93,10 @@ SectionEnd
 
 Section un.LoginStart
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OperaHub"
+SectionEnd
+
+Section un.CliPath
+  nsExec::Exec '"$INSTDIR\opera-hub.exe" service uninstall'
+  Pop $0
 SectionEnd
 '''

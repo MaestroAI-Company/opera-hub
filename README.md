@@ -33,6 +33,8 @@ curl -fsSL https://github.com/MaestroAI-Company/opera-hub/releases/latest/downlo
 
 The script checks every file against the release `SHA256SUMS`. It installs `opera-hub` in `~/.local/bin` (change it with `OPERA_HUB_DIR`) and registers a systemd user service, or a launchd agent on macOS, so the hub starts with your session.
 
+On every system the installer puts `opera-hub` on your `PATH`, so open a new terminal and type the commands below directly.
+
 ## Pair a device
 
 On the hub's computer:
