@@ -495,6 +495,19 @@ pub struct McpServer {
     pub usage: Option<HubUsage>,
 }
 
+//any profile's server as an admin sees it, no values
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerSummary {
+    pub id: String,
+    //none for servers from before profiles
+    pub owner: Option<String>,
+    pub title: String,
+    pub repository: Option<String>,
+    pub state: String,
+    pub tools: u32,
+    pub usage: Option<HubUsage>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpRequest {
@@ -540,6 +553,8 @@ pub enum McpRequest {
     SetRegistries {
         urls: Vec<String>,
     },
+    //every profile's servers, admins only
+    Overview,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -569,6 +584,9 @@ pub enum McpResponse {
     },
     Registries {
         urls: Vec<String>,
+    },
+    Overview {
+        servers: Vec<McpServerSummary>,
     },
     Done,
     Error {

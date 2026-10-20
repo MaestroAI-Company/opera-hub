@@ -263,6 +263,7 @@ async fn hub_runs_mcp_servers() {
     );
     //the form comes from the bundle manifest
     let echo = phone.mcp_prepare(phone_hub.clone(), echo).await.unwrap();
+    let echo_listing = echo.clone();
     let prefix = echo.fields.iter().find(|f| f.key == "prefix").unwrap();
     assert!(prefix.required && prefix.secret);
     assert!(
@@ -417,6 +418,31 @@ async fn hub_runs_mcp_servers() {
             .mcp_folders(flatmate_hub.clone(), Some(home))
             .await
             .is_err()
+    );
+
+    //only an admin sees every profile's servers
+    flatmate
+        .mcp_install(
+            flatmate_hub.clone(),
+            echo_listing,
+            values(&[("prefix", "flatmate says ")]),
+        )
+        .await
+        .unwrap();
+    assert!(flatmate.mcp_overview(flatmate_hub.clone()).await.is_err());
+    let overview = phone.mcp_overview(phone_hub.clone()).await.unwrap();
+    assert_eq!(overview.len(), 4, "{overview:?}");
+    let owned_by = |profile: &str| {
+        overview
+            .iter()
+            .filter(|s| s.owner.as_deref() == Some(profile))
+            .count()
+    };
+    assert_eq!(owned_by(&other.id), 1);
+    let echo_summary = overview.iter().find(|s| s.id == echo_id).unwrap();
+    assert_eq!(
+        (echo_summary.state.as_str(), echo_summary.tools),
+        ("running", 1)
     );
 
     //a new secret restarts the server

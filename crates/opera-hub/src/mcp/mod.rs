@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use opera_hub_proto::{
-    ForwardHead, McpListing, McpServer, McpSource, ProviderInfo, ProvidersResponse, write_frame,
+    ForwardHead, HubUsage, McpListing, McpServer, McpServerSummary, McpSource, ProviderInfo,
+    ProvidersResponse, write_frame,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -64,6 +65,19 @@ enum State {
     Running,
     Failed(String),
     Stopped,
+}
+
+impl State {
+    //wire name and failure message
+    fn label(&self) -> (&'static str, Option<String>) {
+        match self {
+            State::Installing => ("installing", None),
+            State::Starting => ("starting", None),
+            State::Running => ("running", None),
+            State::Failed(error) => ("failed", Some(error.clone())),
+            State::Stopped => ("stopped", None),
+        }
+    }
 }
 
 struct Server {
@@ -384,34 +398,37 @@ impl Mcp {
         self.store.profile(profile).ok().flatten().is_some()
     }
 
-    pub fn status(&self, owner: &str) -> Result<Vec<McpServer>> {
+    //servers with the load of their process tree
+    fn measured(&self, keep: impl Fn(&Server) -> bool) -> Vec<(Arc<Server>, Option<HubUsage>)> {
         let servers: Vec<Arc<Server>> = self
             .servers
             .lock()
             .unwrap()
             .values()
-            .filter(|s| self.may_use(owner, s))
+            .filter(|s| keep(s))
             .cloned()
             .collect();
         let pids: Vec<Option<u32>> = servers.iter().map(|s| *s.pid.lock().unwrap()).collect();
         let roots: Vec<u32> = pids.iter().flatten().copied().collect();
         let mut loads = self.usage.measure(&roots).into_iter();
-        let mut list = Vec::new();
-        for (server, pid) in servers.into_iter().zip(pids) {
-            let usage = pid
-                .and_then(|_| loads.next())
-                .map(|load| opera_hub_proto::HubUsage {
+        servers
+            .into_iter()
+            .zip(pids)
+            .map(|(server, pid)| {
+                let usage = pid.and_then(|_| loads.next()).map(|load| HubUsage {
                     cpu: load.cpu,
                     memory: load.memory,
                 });
+                (server, usage)
+            })
+            .collect()
+    }
+
+    pub fn status(&self, owner: &str) -> Result<Vec<McpServer>> {
+        let mut list = Vec::new();
+        for (server, usage) in self.measured(|s| self.may_use(owner, s)) {
             let spec = server.spec.lock().unwrap().clone();
-            let (state, message) = match server.state.lock().unwrap().clone() {
-                State::Installing => ("installing", None),
-                State::Starting => ("starting", None),
-                State::Running => ("running", None),
-                State::Failed(error) => ("failed", Some(error)),
-                State::Stopped => ("stopped", None),
-            };
+            let (state, message) = server.state.lock().unwrap().label();
             list.push(McpServer {
                 id: server.id.clone(),
                 listing: spec.listing,
@@ -427,6 +444,28 @@ impl Mcp {
         }
         list.sort_by(|a, b| a.listing.title.cmp(&b.listing.title));
         Ok(list)
+    }
+
+    //every profile's servers without their values
+    pub fn overview(&self) -> Vec<McpServerSummary> {
+        let mut list: Vec<McpServerSummary> = self
+            .measured(|_| true)
+            .into_iter()
+            .map(|(server, usage)| {
+                let spec = server.spec.lock().unwrap().clone();
+                McpServerSummary {
+                    id: server.id.clone(),
+                    owner: spec.owner,
+                    title: spec.listing.title,
+                    repository: spec.listing.repository,
+                    state: server.state.lock().unwrap().label().0.into(),
+                    tools: server.tools.lock().unwrap().len() as u32,
+                    usage,
+                }
+            })
+            .collect();
+        list.sort_by(|a, b| a.title.cmp(&b.title));
+        list
     }
 
     pub fn logs(&self, owner: &str, id: &str) -> Result<Vec<String>> {

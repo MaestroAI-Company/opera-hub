@@ -125,6 +125,24 @@ pub struct McpFolders {
     pub folders: Vec<String>,
 }
 
+//any profile's server, for admins
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(
+    not(all(target_family = "wasm", target_os = "unknown")),
+    derive(uniffi::Record)
+)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerSummary {
+    pub id: String,
+    pub owner: Option<String>,
+    pub title: String,
+    pub repository: Option<String>,
+    pub state: String,
+    pub tools: u32,
+    pub cpu: Option<f32>,
+    pub memory: Option<u64>,
+}
+
 impl From<proto::McpListing> for McpListing {
     fn from(listing: proto::McpListing) -> Self {
         Self {
@@ -364,6 +382,26 @@ impl HubClient {
 
     pub async fn mcp_registries(&self, hub: PairedHub) -> Result<Vec<String>, HubError> {
         self.mcp_urls(&hub, McpRequest::Registries).await
+    }
+
+    //every profile's servers, admins only
+    pub async fn mcp_overview(&self, hub: PairedHub) -> Result<Vec<McpServerSummary>, HubError> {
+        match self.mcp(&hub, McpRequest::Overview).await? {
+            McpResponse::Overview { servers } => Ok(servers
+                .into_iter()
+                .map(|s| McpServerSummary {
+                    id: s.id,
+                    owner: s.owner,
+                    title: s.title,
+                    repository: s.repository,
+                    state: s.state,
+                    tools: s.tools,
+                    cpu: s.usage.map(|u| u.cpu),
+                    memory: s.usage.map(|u| u.memory),
+                })
+                .collect()),
+            other => Err(unexpected(other)),
+        }
     }
 
     //raw opera/mcp/1 json, for bridges that speak json
