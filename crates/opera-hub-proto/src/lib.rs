@@ -114,6 +114,8 @@ pub enum HubResponse {
         //the hub with everything it runs
         #[serde(default)]
         usage: Option<HubUsage>,
+        #[serde(default)]
+        model_options: Option<ModelOptions>,
     },
     Unpaired,
     Devices {
@@ -166,6 +168,30 @@ pub struct HubSettings {
     pub mcp_servers: bool,
     //off stops llama.cpp
     pub models: bool,
+    //llama.cpp context in tokens, 0 takes the model's own
+    pub ctx_size: u32,
+    //idle seconds before a model unloads, 0 keeps it loaded
+    pub keep_alive: u32,
+    //requests served at once, 0 lets llama.cpp pick
+    pub parallel: u32,
+}
+
+impl HubSettings {
+    pub fn model_options(&self) -> ModelOptions {
+        ModelOptions {
+            ctx_size: self.ctx_size,
+            keep_alive: self.keep_alive,
+            parallel: self.parallel,
+        }
+    }
+}
+
+//what every device shows of the llama.cpp options
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOptions {
+    pub ctx_size: u32,
+    pub keep_alive: u32,
+    pub parallel: u32,
 }
 
 impl Default for HubSettings {
@@ -175,6 +201,9 @@ impl Default for HubSettings {
             share_providers: true,
             mcp_servers: true,
             models: true,
+            ctx_size: 0,
+            keep_alive: 0,
+            parallel: 0,
         }
     }
 }

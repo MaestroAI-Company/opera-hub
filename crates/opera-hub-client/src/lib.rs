@@ -123,6 +123,9 @@ pub struct HubSettings {
     pub share_providers: bool,
     pub mcp_servers: bool,
     pub models: bool,
+    pub ctx_size: u32,
+    pub keep_alive: u32,
+    pub parallel: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +233,10 @@ pub struct HubStatus {
     //share of the hub machine, with everything it runs
     pub cpu: Option<f32>,
     pub memory: Option<u64>,
+    //llama.cpp options set by an admin, read only here
+    pub ctx_size: Option<u32>,
+    pub keep_alive: Option<u32>,
+    pub parallel: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -923,6 +930,9 @@ impl HubClient {
             share_providers: settings.share_providers,
             mcp_servers: settings.mcp_servers,
             models: settings.models,
+            ctx_size: settings.ctx_size,
+            keep_alive: settings.keep_alive,
+            parallel: settings.parallel,
         };
         self.admin(&hub, AdminRequest::SetSettings { settings })
             .await
@@ -957,6 +967,7 @@ impl HubClient {
                 version,
                 update,
                 usage,
+                model_options,
             } => Ok(HubStatus {
                 name,
                 version,
@@ -964,6 +975,9 @@ impl HubClient {
                 update,
                 cpu: usage.map(|u| u.cpu),
                 memory: usage.map(|u| u.memory),
+                ctx_size: model_options.map(|o| o.ctx_size),
+                keep_alive: model_options.map(|o| o.keep_alive),
+                parallel: model_options.map(|o| o.parallel),
             }),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
@@ -1591,6 +1605,9 @@ impl From<ProtoSettings> for HubSettings {
             share_providers: settings.share_providers,
             mcp_servers: settings.mcp_servers,
             models: settings.models,
+            ctx_size: settings.ctx_size,
+            keep_alive: settings.keep_alive,
+            parallel: settings.parallel,
         }
     }
 }

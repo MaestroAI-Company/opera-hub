@@ -176,6 +176,8 @@ pub struct Session {
     pub name: Arc<str>,
     pub latest: tokio::sync::watch::Receiver<Option<String>>,
     pub usage: Arc<crate::usage::Usage>,
+    //every device shows the model options
+    pub settings: Arc<crate::settings::Settings>,
 }
 
 impl Protocol for Session {
@@ -198,6 +200,7 @@ impl Protocol for Session {
                             cpu: load.cpu,
                             memory: load.memory,
                         }),
+                        model_options: Some(self.settings.get().model_options()),
                     }
                 }
                 HubRequest::Devices => HubResponse::Devices {
@@ -564,6 +567,13 @@ mod tests {
             name: "hub".into(),
             latest: tokio::sync::watch::channel(None).1,
             usage: Default::default(),
+            //no file, the defaults
+            settings: Arc::new(
+                crate::settings::Settings::load(
+                    &std::env::temp_dir().join("opera-hub-no-settings"),
+                )
+                .unwrap(),
+            ),
         };
         let ids = |id: &str| -> Vec<String> {
             let peer = still_allowed(&store, id, Access::Paired).unwrap().unwrap();

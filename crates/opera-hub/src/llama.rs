@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use opera_hub_proto::{
-    CatalogModel, HubUsage, InstalledModel, LlamaStatus, ModelDownload, ModelFile, ModelRepo,
-    ModelsRequest, ModelsResponse, SCOPE_ADMIN, read_frame, write_frame,
+    CatalogModel, HubSettings, HubUsage, InstalledModel, LlamaStatus, ModelDownload, ModelFile,
+    ModelOptions, ModelRepo, ModelsRequest, ModelsResponse, SCOPE_ADMIN, read_frame, write_frame,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -163,6 +163,7 @@ pub struct Llama {
     //the hub wide models setting
     enabled: AtomicBool,
     usage: crate::usage::Usage,
+    options: Mutex<ModelOptions>,
 }
 
 impl std::fmt::Debug for Llama {
@@ -225,6 +226,7 @@ impl Llama {
             restarting: tokio::sync::Mutex::new(()),
             enabled: AtomicBool::new(true),
             usage: Default::default(),
+            options: Mutex::new(HubSettings::default().model_options()),
         })
     }
 
@@ -232,6 +234,11 @@ impl Llama {
     pub fn set_enabled(self: &Arc<Self>, on: bool) {
         self.enabled.store(on, Ordering::SeqCst);
         self.refresh();
+    }
+
+    //read at the next start
+    pub fn set_options(&self, options: ModelOptions) {
+        *self.options.lock().unwrap() = options;
     }
 
     fn models_dir(&self) -> PathBuf {
@@ -495,6 +502,7 @@ impl Llama {
             .arg(&models)
             .args(["--host", "127.0.0.1", "--port", &port.to_string()])
             .args(["--no-webui", "--models-max", MODELS_MAX])
+            .args(option_args(*self.options.lock().unwrap()))
             .stdout(log.try_clone()?)
             .stderr(log)
             .kill_on_drop(true);
@@ -897,5 +905,49 @@ mod tests {
             assert!(check_repo(&model.repo).is_ok(), "{}", model.repo);
             assert!(check_file(&model.file).is_ok(), "{}", model.file);
         }
+    }
+}
+
+//router flags, the model processes inherit them
+fn option_args(options: ModelOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if options.ctx_size > 0 {
+        args.extend(["--ctx-size".into(), options.ctx_size.to_string()]);
+    }
+    if options.keep_alive > 0 {
+        args.extend([
+            "--sleep-idle-seconds".into(),
+            options.keep_alive.to_string(),
+        ]);
+    }
+    if options.parallel > 0 {
+        args.extend(["--parallel".into(), options.parallel.to_string()]);
+    }
+    args
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn zero_options_keep_llama_defaults() {
+        assert!(option_args(HubSettings::default().model_options()).is_empty());
+        let args = option_args(ModelOptions {
+            ctx_size: 8192,
+            keep_alive: 300,
+            parallel: 2,
+        });
+        assert_eq!(
+            args,
+            [
+                "--ctx-size",
+                "8192",
+                "--sleep-idle-seconds",
+                "300",
+                "--parallel",
+                "2"
+            ]
+        );
     }
 }

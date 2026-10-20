@@ -8,6 +8,7 @@ use tokio::sync::watch;
 
 const SETTINGS_FILE: &str = "settings.json";
 
+#[derive(Debug)]
 pub struct Settings {
     path: PathBuf,
     current: watch::Sender<HubSettings>,

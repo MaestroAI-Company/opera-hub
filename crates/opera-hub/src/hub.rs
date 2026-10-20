@@ -149,6 +149,7 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
                     name,
                     latest: latest.clone(),
                     usage: Default::default(),
+                    settings: settings.clone(),
                 },
                 &store,
             ),
@@ -239,17 +240,20 @@ async fn follow_features(
     llama: Arc<Llama>,
     mcp: Arc<Mcp>,
 ) {
-    let mut last: Option<(bool, bool)> = None;
+    let mut last: Option<opera_hub_proto::HubSettings> = None;
     loop {
         let current = *settings.borrow_and_update();
-        //models already on disk start serving
-        if last.is_none_or(|(models, _)| models != current.models) {
+        llama.set_options(current.model_options());
+        //models already on disk start serving, new options need a restart
+        if last.is_none_or(|last| {
+            last.models != current.models || last.model_options() != current.model_options()
+        }) {
             llama.set_enabled(current.models);
         }
-        if last.is_some_and(|(_, servers)| servers != current.mcp_servers) {
+        if last.is_some_and(|last| last.mcp_servers != current.mcp_servers) {
             mcp.set_enabled(current.mcp_servers);
         }
-        last = Some((current.models, current.mcp_servers));
+        last = Some(current);
         if settings.changed().await.is_err() {
             return;
         }
