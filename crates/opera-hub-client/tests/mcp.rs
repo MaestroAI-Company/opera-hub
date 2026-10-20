@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use opera_hub_client::{
-    HubClient, HubError, HubProvider, McpListing, McpSource, PairedHub, ProxyInfo,
+    HubClient, HubError, HubProvider, HubSettings, McpListing, McpSource, PairedHub, ProxyInfo,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -452,6 +452,32 @@ async fn hub_runs_mcp_servers() {
     let from_browser = browser.mcp_overview(browser_hub.clone()).await.unwrap();
     assert_eq!(from_browser.len(), 4);
 
+    //an admin stops and removes another profile's server, a member cannot
+    running(&flatmate, &flatmate_hub, 1).await;
+    let theirs = overview
+        .iter()
+        .find(|s| s.owner.as_deref() == Some(other.id.as_str()))
+        .unwrap()
+        .id
+        .clone();
+    let stopped = phone
+        .mcp_manage(phone_hub.clone(), theirs.clone(), "stop".into())
+        .await
+        .unwrap();
+    assert!(!stopped.iter().find(|s| s.id == theirs).unwrap().enabled);
+    running(&flatmate, &flatmate_hub, 0).await;
+    assert!(
+        flatmate
+            .mcp_manage(flatmate_hub.clone(), echo_id.clone(), "stop".into())
+            .await
+            .is_err()
+    );
+    let left = phone
+        .mcp_manage(phone_hub.clone(), theirs, "remove".into())
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 3);
+
     //a new secret restarts the server
     phone
         .mcp_configure(
@@ -468,12 +494,35 @@ async fn hub_runs_mcp_servers() {
     );
 
     phone
-        .mcp_enable(phone_hub.clone(), everything_id, false)
+        .mcp_enable(phone_hub.clone(), everything_id.clone(), false)
         .await
         .unwrap();
     running(&phone, &phone_hub, 2).await;
     let status = phone.mcp_remove(phone_hub.clone(), time_id).await.unwrap();
     assert_eq!(status.servers.len(), 2);
+    running(&phone, &phone_hub, 1).await;
+
+    //an admin turns every mcp server off, then on again
+    let settings = phone.hub_settings(phone_hub.clone()).await.unwrap();
+    let off = HubSettings {
+        mcp_servers: false,
+        ..settings.clone()
+    };
+    phone
+        .set_hub_settings(phone_hub.clone(), off)
+        .await
+        .unwrap();
+    running(&phone, &phone_hub, 0).await;
+    assert!(
+        phone
+            .mcp_enable(phone_hub.clone(), everything_id, true)
+            .await
+            .is_err()
+    );
+    phone
+        .set_hub_settings(phone_hub.clone(), settings)
+        .await
+        .unwrap();
     running(&phone, &phone_hub, 1).await;
 
     stop_tx.send(()).unwrap();

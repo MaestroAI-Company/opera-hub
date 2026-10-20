@@ -270,6 +270,14 @@ impl WebHubClient {
         Ok(promise(async move { inner.mcp_overview(hub).await }))
     }
 
+    #[wasm_bindgen(js_name = mcpManage)]
+    pub fn mcp_manage(&self, hub: JsValue, id: String, action: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(
+            async move { inner.mcp_manage(hub, id, action).await },
+        ))
+    }
+
     #[wasm_bindgen(js_name = modelsCatalog)]
     pub fn models_catalog(&self, hub: JsValue) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);

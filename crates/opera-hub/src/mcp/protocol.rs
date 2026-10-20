@@ -38,6 +38,18 @@ impl Protocol for McpAdmin {
 impl McpAdmin {
     async fn handle(&self, owner: &str, request: McpRequest) -> Result<McpResponse> {
         let mcp = &self.mcp;
+        //turned off by an admin, nothing new runs
+        let starts = matches!(
+            request,
+            McpRequest::Install { .. }
+                | McpRequest::Enable { on: true, .. }
+                | McpRequest::Restart { .. }
+                | McpRequest::Update { .. }
+        );
+        ensure!(
+            !starts || mcp.enabled(),
+            "mcp servers are turned off on this sampler"
+        );
         let status = || -> Result<McpResponse> {
             Ok(McpResponse::Status {
                 isolation: mcp.isolation().into(),

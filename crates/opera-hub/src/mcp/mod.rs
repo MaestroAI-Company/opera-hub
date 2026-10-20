@@ -10,6 +10,7 @@ pub mod sandbox;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -123,6 +124,8 @@ pub struct Mcp {
     servers: Mutex<HashMap<String, Arc<Server>>>,
     updates: Mutex<Option<JoinHandle<()>>>,
     usage: crate::usage::Usage,
+    //the hub wide mcp servers setting
+    enabled: AtomicBool,
 }
 
 impl std::fmt::Debug for Mcp {
@@ -154,7 +157,30 @@ impl Mcp {
             servers: Mutex::new(HashMap::new()),
             updates: Mutex::new(None),
             usage: Default::default(),
+            enabled: AtomicBool::new(true),
         })
+    }
+
+    //none for servers from before profiles
+    pub fn owner_of(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.server(id)?.owner())
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    //off stops every server, on starts the enabled ones again
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::SeqCst);
+        let servers: Vec<Arc<Server>> = self.servers.lock().unwrap().values().cloned().collect();
+        for server in servers {
+            if !on {
+                server.stop();
+            } else if server.spec.lock().unwrap().enabled {
+                self.start(&server);
+            }
+        }
     }
 
     //servers installed earlier start with the hub
@@ -458,6 +484,7 @@ impl Mcp {
                     owner: spec.owner,
                     title: spec.listing.title,
                     repository: spec.listing.repository,
+                    enabled: spec.enabled,
                     state: server.state.lock().unwrap().label().0.into(),
                     tools: server.tools.lock().unwrap().len() as u32,
                     usage,
@@ -657,6 +684,9 @@ impl Mcp {
 
     fn start(&self, server: &Arc<Server>) {
         server.stop();
+        if !self.enabled() {
+            return;
+        }
         let task = tokio::spawn(supervise(
             self.runtimes.clone(),
             self.db.clone(),

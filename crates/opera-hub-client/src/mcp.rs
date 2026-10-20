@@ -137,6 +137,7 @@ pub struct McpServerSummary {
     pub owner: Option<String>,
     pub title: String,
     pub repository: Option<String>,
+    pub enabled: bool,
     pub state: String,
     pub tools: u32,
     pub cpu: Option<f32>,
@@ -386,26 +387,25 @@ impl HubClient {
 
     //every profile's servers, on the admin channel so browsers reach it
     pub async fn mcp_overview(&self, hub: PairedHub) -> Result<Vec<McpServerSummary>, HubError> {
-        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
-        let response = stream.request(&AdminRequest::McpServers).await?;
-        stream.finish();
-        match response {
-            AdminResponse::McpServers { servers } => Ok(servers
-                .into_iter()
-                .map(|s| McpServerSummary {
-                    id: s.id,
-                    owner: s.owner,
-                    title: s.title,
-                    repository: s.repository,
-                    state: s.state,
-                    tools: s.tools,
-                    cpu: s.usage.map(|u| u.cpu),
-                    memory: s.usage.map(|u| u.memory),
-                })
-                .collect()),
-            AdminResponse::Error { message } => Err(HubError::Internal(message)),
-            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
-        }
+        self.mcp_admin(&hub, AdminRequest::McpServers).await
+    }
+
+    //start, stop, restart or remove any profile's server
+    pub async fn mcp_manage(
+        &self,
+        hub: PairedHub,
+        id: String,
+        action: String,
+    ) -> Result<Vec<McpServerSummary>, HubError> {
+        let action = match action.as_str() {
+            "start" => proto::McpAction::Start,
+            "stop" => proto::McpAction::Stop,
+            "restart" => proto::McpAction::Restart,
+            "remove" => proto::McpAction::Remove,
+            other => return Err(HubError::Internal(format!("unknown action {other}"))),
+        };
+        self.mcp_admin(&hub, AdminRequest::ManageMcp { id, action })
+            .await
     }
 
     //raw opera/mcp/1 json, for bridges that speak json
@@ -427,6 +427,34 @@ impl HubClient {
 }
 
 impl HubClient {
+    async fn mcp_admin(
+        &self,
+        hub: &PairedHub,
+        request: AdminRequest,
+    ) -> Result<Vec<McpServerSummary>, HubError> {
+        let mut stream = self.stream(hub, ADMIN_ALPN).await?;
+        let response = stream.request(&request).await?;
+        stream.finish();
+        match response {
+            AdminResponse::McpServers { servers } => Ok(servers
+                .into_iter()
+                .map(|s| McpServerSummary {
+                    id: s.id,
+                    owner: s.owner,
+                    title: s.title,
+                    repository: s.repository,
+                    enabled: s.enabled,
+                    state: s.state,
+                    tools: s.tools,
+                    cpu: s.usage.map(|u| u.cpu),
+                    memory: s.usage.map(|u| u.memory),
+                })
+                .collect()),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
+        }
+    }
+
     async fn mcp(&self, hub: &PairedHub, request: McpRequest) -> Result<McpResponse, HubError> {
         let mut stream = self.stream(hub, MCP_ALPN).await?;
         let response = stream.request(&request).await?;

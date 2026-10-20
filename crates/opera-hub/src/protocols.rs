@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::anyhow;
 use opera_hub_proto::{
-    AdminRequest, AdminResponse, HubRequest, HubResponse, PairRequest, PairResponse, ProfileInfo,
-    ProfileRole, SCOPE_ADMIN, clean_device_name, read_frame, write_frame,
+    AdminRequest, AdminResponse, HubRequest, HubResponse, McpAction, PairRequest, PairResponse,
+    ProfileInfo, ProfileRole, SCOPE_ADMIN, clean_device_name, read_frame, write_frame,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -348,6 +348,19 @@ impl Protocol for Admin {
                 AdminRequest::McpServers => AdminResponse::McpServers {
                     servers: self.mcp.overview(),
                 },
+                AdminRequest::ManageMcp { id, action } => {
+                    match self.manage_mcp(peer.profile()?, &id, action).await {
+                        Ok(()) => {
+                            info!("{} {action:?} mcp server {id}", peer.short());
+                            AdminResponse::McpServers {
+                                servers: self.mcp.overview(),
+                            }
+                        }
+                        Err(e) => AdminResponse::Error {
+                            message: format!("{e:#}"),
+                        },
+                    }
+                }
                 AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
                     Ok(()) => {
                         info!("{} changed the hub settings", peer.short());
@@ -365,6 +378,17 @@ impl Protocol for Admin {
 }
 
 impl Admin {
+    //acts as the owner, servers from before profiles belong to admins
+    async fn manage_mcp(&self, admin: &str, id: &str, action: McpAction) -> Result<()> {
+        let owner = self.mcp.owner_of(id)?.unwrap_or_else(|| admin.to_string());
+        match action {
+            McpAction::Start => self.mcp.enable(&owner, id, true),
+            McpAction::Stop => self.mcp.enable(&owner, id, false),
+            McpAction::Restart => self.mcp.restart(&owner, id),
+            McpAction::Remove => self.mcp.remove(&owner, id).await,
+        }
+    }
+
     async fn remove_profile(&self, id: &str) -> Result<Vec<ProfileInfo>> {
         let profiles = self.store.profiles()?;
         let left: Vec<_> = profiles.iter().filter(|p| p.id != id).cloned().collect();

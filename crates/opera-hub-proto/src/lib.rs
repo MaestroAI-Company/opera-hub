@@ -143,6 +143,8 @@ pub enum AdminRequest {
     SetRole { id: String, role: ProfileRole },
     //every profile's mcp servers, no values
     McpServers,
+    //settings and secrets stay with their owner
+    ManageMcp { id: String, action: McpAction },
 }
 
 //cpu share of the machine, memory in bytes
@@ -160,6 +162,10 @@ pub struct HubSettings {
     pub lan_discovery: bool,
     //paired devices may use this machine's providers
     pub share_providers: bool,
+    //off stops every profile's mcp servers
+    pub mcp_servers: bool,
+    //off stops llama.cpp
+    pub models: bool,
 }
 
 impl Default for HubSettings {
@@ -167,6 +173,8 @@ impl Default for HubSettings {
         Self {
             lan_discovery: true,
             share_providers: true,
+            mcp_servers: true,
+            models: true,
         }
     }
 }
@@ -506,9 +514,20 @@ pub struct McpServerSummary {
     pub owner: Option<String>,
     pub title: String,
     pub repository: Option<String>,
+    pub enabled: bool,
     pub state: String,
     pub tools: u32,
     pub usage: Option<HubUsage>,
+}
+
+//what an admin does to any profile's server
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAction {
+    Start,
+    Stop,
+    Restart,
+    Remove,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -655,6 +674,9 @@ pub struct LlamaStatus {
     pub message: Option<String>,
     pub installed: Vec<InstalledModel>,
     pub downloads: Vec<ModelDownload>,
+    //llama-server with its model processes
+    #[serde(default)]
+    pub usage: Option<HubUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

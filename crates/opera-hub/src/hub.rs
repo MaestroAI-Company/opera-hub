@@ -64,6 +64,7 @@ struct Running {
     mcp: Arc<Mcp>,
     lan: tokio::task::JoinHandle<()>,
     updates: tokio::task::JoinHandle<()>,
+    features: tokio::task::JoinHandle<()>,
     _lock: std::fs::File,
 }
 
@@ -74,6 +75,7 @@ impl Running {
         self.mcp.stop_all();
         self.lan.abort();
         self.updates.abort();
+        self.features.abort();
         self.router.shutdown().await?;
         Ok(())
     }
@@ -115,10 +117,15 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
     let (sender, latest) = tokio::sync::watch::channel(None);
     let updates = tokio::spawn(update::watch_releases(http.clone(), sender));
     let llama = Llama::new(data_dir, http.clone());
-    //models already on disk start serving
-    llama.refresh();
     let mcp = Mcp::new(data_dir, http.clone(), db.clone(), store.clone());
+    //an admin may have turned either off
+    mcp.set_enabled(settings.get().mcp_servers);
     mcp.start_installed();
+    let features = tokio::spawn(follow_features(
+        settings.subscribe(),
+        llama.clone(),
+        mcp.clone(),
+    ));
     let name: Arc<str> = config.hub_name().into();
     let links = Arc::new(Links::default());
     let router = Router::builder(endpoint)
@@ -221,8 +228,32 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
         mcp,
         lan,
         updates,
+        features,
         _lock: lock,
     })
+}
+
+//models and mcp servers follow their hub setting
+async fn follow_features(
+    mut settings: tokio::sync::watch::Receiver<opera_hub_proto::HubSettings>,
+    llama: Arc<Llama>,
+    mcp: Arc<Mcp>,
+) {
+    let mut last: Option<(bool, bool)> = None;
+    loop {
+        let current = *settings.borrow_and_update();
+        //models already on disk start serving
+        if last.is_none_or(|(models, _)| models != current.models) {
+            llama.set_enabled(current.models);
+        }
+        if last.is_some_and(|(_, servers)| servers != current.mcp_servers) {
+            mcp.set_enabled(current.mcp_servers);
+        }
+        last = Some((current.models, current.mcp_servers));
+        if settings.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 //announces while the setting allows it

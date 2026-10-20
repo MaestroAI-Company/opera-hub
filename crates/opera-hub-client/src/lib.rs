@@ -121,6 +121,8 @@ pub struct HubInvite {
 pub struct HubSettings {
     pub lan_discovery: bool,
     pub share_providers: bool,
+    pub mcp_servers: bool,
+    pub models: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +210,8 @@ pub struct LlamaStatus {
     pub message: Option<String>,
     pub installed: Vec<InstalledModel>,
     pub downloads: Vec<ModelDownload>,
+    pub cpu: Option<f32>,
+    pub memory: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -917,6 +921,8 @@ impl HubClient {
         let settings = ProtoSettings {
             lan_discovery: settings.lan_discovery,
             share_providers: settings.share_providers,
+            mcp_servers: settings.mcp_servers,
+            models: settings.models,
         };
         self.admin(&hub, AdminRequest::SetSettings { settings })
             .await
@@ -1419,6 +1425,8 @@ impl HubClient {
                         error: d.error,
                     })
                     .collect(),
+                cpu: status.usage.map(|u| u.cpu),
+                memory: status.usage.map(|u| u.memory),
             }),
             other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
@@ -1581,6 +1589,8 @@ impl From<ProtoSettings> for HubSettings {
         Self {
             lan_discovery: settings.lan_discovery,
             share_providers: settings.share_providers,
+            mcp_servers: settings.mcp_servers,
+            models: settings.models,
         }
     }
 }

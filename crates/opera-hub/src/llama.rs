@@ -1,13 +1,14 @@
 //llama.cpp on the hub, one llama-server in router mode
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use opera_hub_proto::{
-    CatalogModel, InstalledModel, LlamaStatus, ModelDownload, ModelFile, ModelRepo, ModelsRequest,
-    ModelsResponse, SCOPE_ADMIN, read_frame, write_frame,
+    CatalogModel, HubUsage, InstalledModel, LlamaStatus, ModelDownload, ModelFile, ModelRepo,
+    ModelsRequest, ModelsResponse, SCOPE_ADMIN, read_frame, write_frame,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -159,6 +160,9 @@ pub struct Llama {
     inner: Mutex<Inner>,
     //one restart at a time
     restarting: tokio::sync::Mutex<()>,
+    //the hub wide models setting
+    enabled: AtomicBool,
+    usage: crate::usage::Usage,
 }
 
 impl std::fmt::Debug for Llama {
@@ -219,7 +223,15 @@ impl Llama {
                 downloads: HashMap::new(),
             }),
             restarting: tokio::sync::Mutex::new(()),
+            enabled: AtomicBool::new(true),
+            usage: Default::default(),
         })
+    }
+
+    //off stops the server until turned back on
+    pub fn set_enabled(self: &Arc<Self>, on: bool) {
+        self.enabled.store(on, Ordering::SeqCst);
+        self.refresh();
     }
 
     fn models_dir(&self) -> PathBuf {
@@ -293,12 +305,24 @@ impl Llama {
             })
             .collect();
         downloads.sort_by(|a, b| a.file.cmp(&b.file));
-        LlamaStatus {
+        let pid = inner.child.as_ref().and_then(|child| child.id());
+        let status = LlamaStatus {
             state: inner.state.as_str().into(),
             backend: inner.backend.clone(),
             message: inner.message.clone(),
             installed,
             downloads,
+            usage: None,
+        };
+        drop(inner);
+        LlamaStatus {
+            usage: pid
+                .and_then(|pid| self.usage.measure(&[pid]).into_iter().next())
+                .map(|load| HubUsage {
+                    cpu: load.cpu,
+                    memory: load.memory,
+                }),
+            ..status
         }
     }
 
@@ -314,7 +338,8 @@ impl Llama {
         tokio::spawn(async move {
             let _one = llama.restarting.lock().await;
             llama.stop_server();
-            if llama.installed().is_empty() {
+            let enabled = llama.enabled.load(Ordering::SeqCst);
+            if !enabled || llama.installed().is_empty() {
                 llama.set_state(State::Idle, None);
                 return;
             }
