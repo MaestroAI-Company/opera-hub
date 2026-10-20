@@ -108,6 +108,8 @@ async fn start(data_dir: &Path, targets: Vec<Target>) -> Result<Running> {
         endpoint.bound_sockets(),
     ));
     let store = Arc::new(Store::new(data_dir));
+    //devices paired before a scope changed get it
+    store.refresh_scopes()?;
     let db = Arc::new(Db::open(data_dir)?);
     let http = http_client()?;
     let (sender, latest) = tokio::sync::watch::channel(None);

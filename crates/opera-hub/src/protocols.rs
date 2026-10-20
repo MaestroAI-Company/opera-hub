@@ -345,6 +345,9 @@ impl Protocol for Admin {
                         message: format!("{e:#}"),
                     },
                 },
+                AdminRequest::McpServers => AdminResponse::McpServers {
+                    servers: self.mcp.overview(),
+                },
                 AdminRequest::SetSettings { settings } => match self.settings.set(settings) {
                     Ok(()) => {
                         info!("{} changed the hub settings", peer.short());
@@ -424,7 +427,7 @@ fn restart_soon() {
 
 #[cfg(test)]
 mod tests {
-    use opera_hub_proto::{KIND_PHONE, KIND_WEB, SCOPE_SYNC};
+    use opera_hub_proto::{KIND_PHONE, KIND_WEB, SCOPE_MCP, SCOPE_SYNC};
 
     use super::*;
 
@@ -492,6 +495,7 @@ mod tests {
             ("owner phone", KIND_PHONE, &owner),
             ("flatmate phone", KIND_PHONE, &flatmate),
             ("owner browser", KIND_WEB, &owner),
+            ("flatmate browser", KIND_WEB, &flatmate),
         ] {
             add_device(&store, id, kind);
             store.bind_device(id, &profile.id).unwrap();
@@ -504,11 +508,12 @@ mod tests {
             "flatmate phone",
             Access::Scope(SCOPE_ADMIN)
         ));
-        //a browser never manages either
-        assert!(allowed(&store, "owner browser", Access::Scope(SCOPE_SYNC)));
+        //an admin browser manages the hub, never its mcp servers
+        assert!(allowed(&store, "owner browser", Access::Scope(SCOPE_ADMIN)));
+        assert!(!allowed(&store, "owner browser", Access::Scope(SCOPE_MCP)));
         assert!(!allowed(
             &store,
-            "owner browser",
+            "flatmate browser",
             Access::Scope(SCOPE_ADMIN)
         ));
         store.set_role(&flatmate.id, ProfileRole::Admin).unwrap();

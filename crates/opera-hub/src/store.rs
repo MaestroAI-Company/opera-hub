@@ -30,8 +30,8 @@ pub fn default_scopes(kind: &str) -> Vec<String> {
         ]
         .map(String::from)
         .to_vec(),
-        //a browser tab never manages the hub
-        KIND_WEB => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS]
+        //admin profiles manage the hub from a browser, never mcp servers
+        KIND_WEB => [SCOPE_SYNC, SCOPE_SECRETS, SCOPE_PROVIDERS, SCOPE_ADMIN]
             .map(String::from)
             .to_vec(),
         _ => Vec::new(),
@@ -160,6 +160,24 @@ impl Store {
         write_json(&self.dir.join(DEVICES_FILE), &devices)?;
         write_json(&self.dir.join(PROFILES_FILE), &profiles)?;
         Ok(true)
+    }
+
+    //scopes follow the kind, read at start
+    pub fn refresh_scopes(&self) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
+        let mut devices = self.devices()?;
+        let mut changed = false;
+        for device in &mut devices {
+            let scopes = default_scopes(&device.kind);
+            if device.scopes != scopes {
+                device.scopes = scopes;
+                changed = true;
+            }
+        }
+        if changed {
+            write_json(&self.dir.join(DEVICES_FILE), &devices)?;
+        }
+        Ok(())
     }
 
     //false when device or profile is gone

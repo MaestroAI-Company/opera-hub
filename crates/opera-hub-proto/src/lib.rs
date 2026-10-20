@@ -141,6 +141,8 @@ pub enum AdminRequest {
     //with its data, devices and servers
     RemoveProfile { id: String },
     SetRole { id: String, role: ProfileRole },
+    //every profile's mcp servers, no values
+    McpServers,
 }
 
 //cpu share of the machine, memory in bytes
@@ -177,6 +179,7 @@ pub enum AdminResponse {
     Updating { version: String },
     Devices { devices: Vec<DeviceInfo> },
     Profiles { profiles: Vec<ProfileInfo> },
+    McpServers { servers: Vec<McpServerSummary> },
     Error { message: String },
 }
 
@@ -553,8 +556,6 @@ pub enum McpRequest {
     SetRegistries {
         urls: Vec<String>,
     },
-    //every profile's servers, admins only
-    Overview,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -584,9 +585,6 @@ pub enum McpResponse {
     },
     Registries {
         urls: Vec<String>,
-    },
-    Overview {
-        servers: Vec<McpServerSummary>,
     },
     Done,
     Error {

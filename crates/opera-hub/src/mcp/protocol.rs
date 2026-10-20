@@ -99,12 +99,6 @@ impl McpAdmin {
                     urls: mcp.registries(),
                 }
             }
-            McpRequest::Overview => {
-                ensure!(mcp.is_admin(owner), "only an admin sees every server");
-                McpResponse::Overview {
-                    servers: mcp.overview(),
-                }
-            }
         })
     }
 }

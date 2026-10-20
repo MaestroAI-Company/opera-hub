@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{Forwarded, HubClient, HubError, PairedHub, ProfileLock, SyncRecord};
+use crate::{Forwarded, HubClient, HubError, HubSettings, PairedHub, ProfileLock, SyncRecord};
 
 const CHUNK_BYTES: usize = 16 * 1024;
 
@@ -221,6 +221,104 @@ impl WebHubClient {
     pub fn devices(&self, hub: JsValue) -> Result<Promise, JsValue> {
         let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
         Ok(promise(async move { inner.devices(hub).await }))
+    }
+
+    //admin profiles manage the hub from a browser
+    #[wasm_bindgen(js_name = hubSettings)]
+    pub fn hub_settings(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.hub_settings(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = setHubSettings)]
+    pub fn set_hub_settings(&self, hub: JsValue, settings: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        let settings = from_js::<HubSettings>(settings)?;
+        Ok(promise(async move {
+            inner.set_hub_settings(hub, settings).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = updateHub)]
+    pub fn update_hub(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.update_hub(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = removeProfile)]
+    pub fn remove_profile(&self, hub: JsValue, id: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.remove_profile(hub, id).await }))
+    }
+
+    #[wasm_bindgen(js_name = setProfileRole)]
+    pub fn set_profile_role(
+        &self,
+        hub: JsValue,
+        id: String,
+        role: String,
+    ) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move {
+            inner.set_profile_role(hub, id, role).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = mcpOverview)]
+    pub fn mcp_overview(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.mcp_overview(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = modelsCatalog)]
+    pub fn models_catalog(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.models_catalog(hub).await }))
+    }
+
+    #[wasm_bindgen(js_name = modelsSearch)]
+    pub fn models_search(&self, hub: JsValue, query: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(
+            async move { inner.models_search(hub, query).await },
+        ))
+    }
+
+    #[wasm_bindgen(js_name = modelsFiles)]
+    pub fn models_files(&self, hub: JsValue, repo: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.models_files(hub, repo).await }))
+    }
+
+    #[wasm_bindgen(js_name = modelsDownload)]
+    pub fn models_download(
+        &self,
+        hub: JsValue,
+        repo: String,
+        file: String,
+    ) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move {
+            inner.models_download(hub, repo, file).await
+        }))
+    }
+
+    #[wasm_bindgen(js_name = modelsCancel)]
+    pub fn models_cancel(&self, hub: JsValue, file: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.models_cancel(hub, file).await }))
+    }
+
+    #[wasm_bindgen(js_name = modelsDelete)]
+    pub fn models_delete(&self, hub: JsValue, file: String) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.models_delete(hub, file).await }))
+    }
+
+    #[wasm_bindgen(js_name = modelsStatus)]
+    pub fn models_status(&self, hub: JsValue) -> Result<Promise, JsValue> {
+        let (inner, hub) = (self.inner.clone(), from_js::<PairedHub>(hub)?);
+        Ok(promise(async move { inner.models_status(hub).await }))
     }
 
     pub fn push(

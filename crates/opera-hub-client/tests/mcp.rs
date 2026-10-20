@@ -328,7 +328,11 @@ async fn hub_runs_mcp_servers() {
     );
 
     let phone_proxy = phone.clone().start_proxy(phone_hub.clone()).await.unwrap();
-    let browser_proxy = browser.clone().start_proxy(browser_hub).await.unwrap();
+    let browser_proxy = browser
+        .clone()
+        .start_proxy(browser_hub.clone())
+        .await
+        .unwrap();
     for (proxy, server) in [
         (&phone_proxy, &echo),
         (&browser_proxy, &echo),
@@ -444,6 +448,9 @@ async fn hub_runs_mcp_servers() {
         (echo_summary.state.as_str(), echo_summary.tools),
         ("running", 1)
     );
+    //an admin browser sees them too, without managing any
+    let from_browser = browser.mcp_overview(browser_hub.clone()).await.unwrap();
+    assert_eq!(from_browser.len(), 4);
 
     //a new secret restarts the server
     phone

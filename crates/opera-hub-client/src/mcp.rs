@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use opera_hub_proto as proto;
-use opera_hub_proto::{MCP_ALPN, McpRequest, McpResponse};
+use opera_hub_proto::{ADMIN_ALPN, AdminRequest, AdminResponse, MCP_ALPN, McpRequest, McpResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::{HubClient, HubError, PairedHub};
@@ -384,10 +384,13 @@ impl HubClient {
         self.mcp_urls(&hub, McpRequest::Registries).await
     }
 
-    //every profile's servers, admins only
+    //every profile's servers, on the admin channel so browsers reach it
     pub async fn mcp_overview(&self, hub: PairedHub) -> Result<Vec<McpServerSummary>, HubError> {
-        match self.mcp(&hub, McpRequest::Overview).await? {
-            McpResponse::Overview { servers } => Ok(servers
+        let mut stream = self.stream(&hub, ADMIN_ALPN).await?;
+        let response = stream.request(&AdminRequest::McpServers).await?;
+        stream.finish();
+        match response {
+            AdminResponse::McpServers { servers } => Ok(servers
                 .into_iter()
                 .map(|s| McpServerSummary {
                     id: s.id,
@@ -400,7 +403,8 @@ impl HubClient {
                     memory: s.usage.map(|u| u.memory),
                 })
                 .collect()),
-            other => Err(unexpected(other)),
+            AdminResponse::Error { message } => Err(HubError::Internal(message)),
+            other => Err(HubError::Internal(format!("unexpected answer {other:?}"))),
         }
     }
 
