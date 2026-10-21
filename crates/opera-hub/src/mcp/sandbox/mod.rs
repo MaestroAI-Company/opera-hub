@@ -216,6 +216,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn server_cannot_reach_host_sockets() {
+        let root = temp_dir();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        //fakes the systemd user bus
+        let socket = root.join("bus.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let policy = Policy {
+            name: "OperaHub.test.socket".into(),
+            shared: Vec::new(),
+            read: Vec::new(),
+            write: vec![home.clone()],
+        };
+        let line = format!(
+            "python3 -c \"import socket; socket.socket(socket.AF_UNIX).connect('{}')\"",
+            socket.display()
+        );
+        let (_, err) = shell(&line, &home, &policy).await;
+        assert!(
+            listener.accept().is_err(),
+            "the sandbox reached a host socket"
+        );
+        assert!(err.contains("PermissionError"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn server_cannot_reach_host_sockets() {
+        let root = temp_dir();
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        //fakes docker or the ssh agent
+        let socket = root.join("agent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let policy = Policy {
+            name: "OperaHub.test.socket".into(),
+            shared: Vec::new(),
+            read: Vec::new(),
+            write: vec![home.clone()],
+        };
+        //xcode python shim fails sandboxed
+        let line = format!("nc -U -w 1 '{}' < /dev/null", socket.display());
+        let (_, err) = shell(&line, &home, &policy).await;
+        assert!(
+            listener.accept().is_err(),
+            "the sandbox reached a host socket"
+        );
+        assert!(err.contains("Operation not permitted"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn dropping_the_child_kills_its_tree() {
         let root = temp_dir();

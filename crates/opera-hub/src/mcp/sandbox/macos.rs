@@ -20,7 +20,10 @@ const BASE_PROFILE: &str = r#"(version 1)
 (allow process-info* (target same-sandbox))
 (allow sysctl-read)
 (allow system-socket)
-(allow network-outbound)
+;unix sockets would run owner commands
+(allow network-outbound
+  (literal "/private/var/run/mDNSResponder")
+  (remote ip))
 (allow mach-lookup
   (global-name "com.apple.dnssd.service")
   (global-name "com.apple.trustd.agent")
