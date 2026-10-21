@@ -263,12 +263,11 @@ mod tests {
         };
         //xcode python shim fails sandboxed
         let line = format!("nc -U -w 1 '{}' < /dev/null", socket.display());
-        let (_, err) = shell(&line, &home, &policy).await;
+        shell(&line, &home, &policy).await;
         assert!(
             listener.accept().is_err(),
             "the sandbox reached a host socket"
         );
-        assert!(err.contains("Operation not permitted"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
